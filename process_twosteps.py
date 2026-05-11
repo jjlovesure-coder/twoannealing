@@ -210,14 +210,20 @@ def main():
     print(f"  Empty: {len(empty)} pts, T range {empty['Temp'].min():.1f}–{empty['Temp'].max():.1f} °C")
     print(f"  Ref:   {len(ref)} pts, T range {ref['Temp'].min():.1f}–{ref['Temp'].max():.1f} °C")
 
-    # Trim to 30-200°C range for calibration
-    mask_e = (empty['Temp'] >= 28) & (empty['Temp'] <= 202)
-    mask_r = (ref['Temp'] >= 28) & (ref['Temp'] <= 202)
+    # Find overlapping temperature range across all three datasets
+    T_min = max(empty['Temp'].min(), ref['Temp'].min(), 30.0)
+    T_max = min(empty['Temp'].max(), ref['Temp'].max(), 200.0)
+
+    # Trim to overlapping range for calibration
+    mask_e = (empty['Temp'] >= T_min - 0.5) & (empty['Temp'] <= T_max + 0.5)
+    mask_r = (ref['Temp'] >= T_min - 0.5) & (ref['Temp'] <= T_max + 0.5)
     empty_cal = empty[mask_e].copy()
     ref_cal   = ref[mask_r].copy()
 
-    # Interpolate to common temperature grid (0.1°C steps)
-    T_grid = np.arange(30.0, 200.01, 0.1)
+    print(f"  Calibration T range: {T_min:.1f}–{T_max:.1f} °C (overlap of empty+ref)")
+
+    # Interpolate to common temperature grid (0.1°C steps) within valid range
+    T_grid = np.arange(np.ceil(T_min), np.floor(T_max) + 0.01, 0.1)
     interp_empty = interp1d(empty_cal['Temp'], empty_cal['DSC'], kind='linear',
                             bounds_error=False, fill_value='extrapolate')
     interp_ref   = interp1d(ref_cal['Temp'], ref_cal['DSC'], kind='linear',
@@ -232,13 +238,12 @@ def main():
 
     # cp_sample(T) = cp_ref(T) × [DSC_sample - DSC_empty] / [DSC_ref - DSC_empty] × (m_ref / m_sample)
     dsc_empty_to_ref = DSC_ref_grid - DSC_empty_grid  # µW
-    # Avoid division by zero (shouldn't happen in 30-200°C range)
+    # Avoid division by zero (shouldn't happen in overlapping T range)
     valid = np.abs(dsc_empty_to_ref) > 1e-6
+    valid_fraction = valid.sum() / len(T_grid) * 100
 
-    # Pre-compute the calibration denominator
-    cal_denom = dsc_empty_to_ref / (cp_ref_grid * M_REF)  # µW / (J/(g·K) * mg) = µW·g·K/J·mg
-
-    print(f"  Valid calibration points: {valid.sum()}/{len(T_grid)}")
+    print(f"  Calibration grid: {T_grid[0]:.1f}–{T_grid[-1]:.1f} °C ({len(T_grid)} pts)")
+    print(f"  Valid calibration points: {valid.sum()}/{len(T_grid)} ({valid_fraction:.0f}%)")
 
     # ── 3. Load twosteps data ────────────────────────────────────────────
     print("\n[3/5] Loading twosteps data and detecting heating ramps...")
@@ -378,9 +383,13 @@ def main():
     ax1.axvspan(T_INT_LOW, T_INT_HIGH, alpha=0.08, color='green')
     ax1.set_xlabel('Temperature (°C)')
     ax1.set_ylabel('cp (J/(g·K))')
-    ax1.set_title('Specific heat capacity — all ramps by T1 group')
+    ax1.set_title(f'Specific heat capacity — all ramps by T1 group\n(calibration range {T_grid[0]:.0f}–{T_grid[-1]:.0f} °C)')
     ax1.legend(fontsize=8)
-    ax1.set_xlim(28, 202)
+    ax1.set_xlim(T_grid[0] - 2, T_grid[-1] + 2)
+    ax1.axvline(T_max, color='gray', linestyle=':', alpha=0.5, linewidth=0.8)
+    ax1.text(T_max + 0.5, cp_curves[:, int_mask].mean() * 0.5,
+             f'empty data ends\nat {T_max:.0f}°C',
+             fontsize=7, color='gray', va='center')
 
     # --- Panel 2: DSC heating curves (T-axis aligned) ---
     ax2 = fig.add_subplot(2, 3, 2)
