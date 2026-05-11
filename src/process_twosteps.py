@@ -204,8 +204,8 @@ def main():
 
     # ── 1. Load empty and reference data ─────────────────────────────────
     print("\n[1/5] Loading empty and reference data...")
-    empty = load_dsc_simple('ps-empty-01.xlsx')
-    ref   = load_dsc_simple('ps-ref-01.xlsx')
+    empty = load_dsc_simple('../data/ps-empty-01.xlsx')
+    ref   = load_dsc_simple('../data/ps-ref-01.xlsx')
 
     print(f"  Empty: {len(empty)} pts, T range {empty['Temp'].min():.1f}–{empty['Temp'].max():.1f} °C")
     print(f"  Ref:   {len(ref)} pts, T range {ref['Temp'].min():.1f}–{ref['Temp'].max():.1f} °C")
@@ -247,7 +247,7 @@ def main():
 
     # ── 3. Load twosteps data ────────────────────────────────────────────
     print("\n[3/5] Loading twosteps data and detecting heating ramps...")
-    ts_data, program = load_dsc_twosteps('twosteps.xlsx')
+    ts_data, program = load_dsc_twosteps('../data/twosteps.xlsx')
     T_ts = ts_data['Temp'].values
     t_ts = ts_data['Time'].values
     DSC_ts = ts_data['DSC'].values
@@ -494,12 +494,12 @@ def main():
     ax6.set_title('Results Summary', fontsize=12, fontweight='bold', pad=5)
 
     plt.tight_layout(pad=2)
-    plt.savefig('twosteps_enthalpy_results.png', dpi=150, bbox_inches='tight')
-    print("  Saved twosteps_enthalpy_results.png")
+    plt.savefig('../results/twosteps_enthalpy_results.png', dpi=150, bbox_inches='tight')
+    print("  Saved ../results/twosteps_enthalpy_results.png")
 
     # Save results to CSV
-    results_df.to_csv('twosteps_enthalpy_results.csv', index=False, float_format='%.6f')
-    print("  Saved twosteps_enthalpy_results.csv")
+    results_df.to_csv('../results/twosteps_enthalpy_results.csv', index=False, float_format='%.6f')
+    print("  Saved ../results/twosteps_enthalpy_results.csv")
 
     # ── Print summary ─────────────────────────────────────────────────────
     print("\n" + "=" * 70)

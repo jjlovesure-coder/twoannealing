@@ -18,16 +18,34 @@ Enthalpy change is obtained by integrating cp(T) over the temperature range of i
 ΔH = ∫ cp(T) dT    (30°C → 100°C)
 ```
 
+## Directory Structure
+
+```
+├── data/           # Raw DSC measurement files
+│   ├── twosteps.xlsx
+│   ├── ps-empty-01.xlsx
+│   ├── ps-ref-01.xlsx
+│   ├── PS-onestep-01.xlsx
+│   ├── PS-onestep-02.xlsx
+│   └── pskovacs.xlsx
+├── results/        # Generated output
+│   ├── twosteps_enthalpy_results.csv
+│   └── twosteps_enthalpy_results.png
+├── src/            # Processing code
+│   └── process_twosteps.py
+└── README.md
+```
+
 ## Data Files
 
 | File | Description |
 |------|-------------|
-| `twosteps.xlsx` | Main experiment: 20 annealing cycles with varying T1/T2 hold times |
-| `ps-empty-01.xlsx` | Empty crucible baseline (30–200°C ramp, stopped at ~168°C) |
-| `ps-ref-01.xlsx` | Sapphire (Al₂O₃) reference, 10 mg (30–200°C) |
-| `PS-onestep-01.xlsx` | One-step annealing data (supplementary) |
-| `PS-onestep-02.xlsx` | One-step annealing data (supplementary) |
-| `pskovacs.xlsx` | Kovacs-type experiment data |
+| `data/twosteps.xlsx` | Main experiment: 20 annealing cycles with varying T1/T2 hold times |
+| `data/ps-empty-01.xlsx` | Empty crucible baseline (30–200°C ramp, stopped at ~168°C) |
+| `data/ps-ref-01.xlsx` | Sapphire (Al₂O₃) reference, 10 mg (30–200°C) |
+| `data/PS-onestep-01.xlsx` | One-step annealing data (supplementary) |
+| `data/PS-onestep-02.xlsx` | One-step annealing data (supplementary) |
+| `data/pskovacs.xlsx` | Kovacs-type experiment data |
 
 ## Experimental Parameters
 
@@ -54,12 +72,13 @@ Enthalpy change is obtained by integrating cp(T) over the temperature range of i
 
 ### Output Files
 
-- `twosteps_enthalpy_results.png` — Six-panel comprehensive figure (cp curves, DSC curves, ΔH vs T2, bar chart, cp_avg comparison, results table)
-- `twosteps_enthalpy_results.csv` — Numerical results for all 20 annealing conditions
+- `results/twosteps_enthalpy_results.png` — Six-panel comprehensive figure (cp curves, DSC curves, ΔH vs T2, bar chart, cp_avg comparison, results table)
+- `results/twosteps_enthalpy_results.csv` — Numerical results for all 20 annealing conditions
 
 ## Usage
 
 ```bash
+cd src
 pip install numpy pandas scipy matplotlib openpyxl
 python process_twosteps.py
 ```
