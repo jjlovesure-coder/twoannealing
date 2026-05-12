@@ -154,20 +154,11 @@ def main():
     print("  Two-step annealing DSC analysis — Direct heat-flow integration")
     print("=" * 70)
 
-    # ── 1. Load empty baseline ──────────────────────────────────────────
-    print("\n[1/4] Loading empty crucible baseline...")
-    empty = load_dsc_simple(os.path.join(DATA_DIR, 'ps-empty-01.xlsx'))
-    print(f"  Empty: {len(empty)} pts, T range {empty['Temp'].min():.1f}–{empty['Temp'].max():.1f} °C")
+    # ── 1. Setup integration grid ──────────────────────────────────────
 
-    # Interpolate empty DSC to a standard T grid for subtraction
-    T_empty_min = max(empty['Temp'].min(), 30.0)
-    T_empty_max = min(empty['Temp'].max(), 200.0)
-    T_grid = np.arange(np.ceil(T_empty_min), np.floor(T_empty_max) + 0.01, 0.1)
-    interp_empty = interp1d(empty['Temp'], empty['DSC'], kind='linear',
-                            bounds_error=False, fill_value='extrapolate')
-    DSC_empty_grid = interp_empty(T_grid)
-
-    print(f"  Baseline grid: {T_grid[0]:.0f}–{T_grid[-1]:.0f} °C ({len(T_grid)} pts)")
+    # T grid for integration (direct from sample DSC, no empty subtraction)
+    T_grid = np.arange(30.0, 200.0, 0.1)
+    print(f"  Integration grid: {T_grid[0]:.0f}–{T_grid[-1]:.0f} °C ({len(T_grid)} pts)")
 
     # ── 2. Load experiment data ──────────────────────────────────────────
     print("\n[2/4] Loading twosteps data and detecting heating ramps...")
@@ -228,12 +219,11 @@ def main():
         DSC_seg = DSC_exp[s:e+1]
         interp_dsc = interp1d(T_seg, DSC_seg, kind='linear',
                               bounds_error=False, fill_value='extrapolate')
-        DSC_sample_grid = interp_dsc(T_grid)
-        delta_DSC = DSC_sample_grid - DSC_empty_grid
+        DSC_grid = interp_dsc(T_grid)
         int_mask = (T_grid >= T_INT_LOW) & (T_grid <= T_INT_HIGH)
-        integral = trapezoid(delta_DSC[int_mask], T_grid[int_mask])  # µW·°C
+        integral = trapezoid(DSC_grid[int_mask], T_grid[int_mask])  # µW·°C
         raw_integrals.append(integral)
-        dsc_curves.append(delta_DSC)
+        dsc_curves.append(DSC_grid)
         print(f"    Ramp {ramp_idx+1:2d}: t1={cond['T1_hold_min']:8.4f} min, "
               f"t2={cond['T2_hold_min']:8.4f} min → "
               f"raw integral = {integral:.1f} µW·°C")
