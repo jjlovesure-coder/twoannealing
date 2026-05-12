@@ -194,17 +194,15 @@ def process_onestep(data_file, sheet, T_anneal, label, out_name):
         int_mask = (T_grid >= T_INT_LOW) & (T_grid <= T_INT_HIGH)
         raw_integrals.append(trapezoid(delta_DSC[int_mask], T_grid[int_mask]))
 
-    # Per-run reference (after filtering, first half = Run 1, second half = Run 2)
-    n = len(raw_integrals) // 2
-    ref_R1 = raw_integrals[0]
-    ref_R2 = raw_integrals[n] if n > 0 else ref_R1
-    all_diffs = [(r - (ref_R1 if i < n else ref_R2)) * CONV_KJMOL for i, r in enumerate(raw_integrals)]
+    # Single global reference: shortest hold in Run 1 for both runs
+    # This preserves the offset between cooling protocols (50s vs 500s)
+    ref_global = raw_integrals[0]
+    all_diffs = [(r - ref_global) * CONV_KJMOL for r in raw_integrals]
     offset = max(0, -min(all_diffs)) + 1.0
     results = []
     for ramp_idx, cond in enumerate(conditions):
         integral = raw_integrals[ramp_idx]
-        ref = ref_R1 if ramp_idx < n else ref_R2
-        delta_H_raw = (integral - ref) * CONV_KJMOL
+        delta_H_raw = (integral - ref_global) * CONV_KJMOL
         delta_H = delta_H_raw + offset
         results.append({
             'ramp': ramp_idx + 1, 'hold_min': cond['hold_min'],
@@ -224,9 +222,9 @@ def process_onestep(data_file, sheet, T_anneal, label, out_name):
     r1 = results_df.iloc[:n_half]
     r2 = results_df.iloc[n_half:]
     ax1.plot(r1['hold_min'], r1['delta_H_kJmol'], 'o-', color='#2166AC', linewidth=1.8,
-             markersize=9, markerfacecolor='white', markeredgewidth=1.5, label='Run 1')
+             markersize=9, markerfacecolor='white', markeredgewidth=1.5, label='cooling 50s')
     ax1.plot(r2['hold_min'], r2['delta_H_kJmol'], 's--', color='#B2182B', linewidth=1.8,
-             markersize=9, markerfacecolor='white', markeredgewidth=1.5, label='Run 2')
+             markersize=9, markerfacecolor='white', markeredgewidth=1.5, label='cooling 500s')
     ax1.set_xlabel(f'Hold time at {T_anneal}°C (min)')
     ax1.set_ylabel(f'ΔH (kJ/mol)')
     ax1.set_title(f'{label}: Released enthalpy vs annealing time')
@@ -266,8 +264,8 @@ def process_onestep(data_file, sheet, T_anneal, label, out_name):
         print(f"  {r['ramp']:<4.0f}  {r['hold_min']:>12.4f}  {r['delta_H_kJmol']:>12.2f}")
     run1 = results_df.iloc[:n_half]
     run2 = results_df.iloc[n_half:]
-    print(f"\n  Run 1: ΔH = {run1['delta_H_kJmol'].min():.2f} – {run1['delta_H_kJmol'].max():.2f} kJ/mol")
-    print(f"  Run 2: ΔH = {run2['delta_H_kJmol'].min():.2f} – {run2['delta_H_kJmol'].max():.2f} kJ/mol")
+    print(f"\n  cooling 50s: ΔH = {run1['delta_H_kJmol'].min():.2f} – {run1['delta_H_kJmol'].max():.2f} kJ/mol")
+    print(f"  cooling 500s: ΔH = {run2['delta_H_kJmol'].min():.2f} – {run2['delta_H_kJmol'].max():.2f} kJ/mol")
 
     return results_df
 
