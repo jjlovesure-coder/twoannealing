@@ -24,8 +24,8 @@ DT_DT = 1.0 / BETA   # s/°C
 # ΔH(J/g) = DT_DT / (M_SAMPLE * 1000) * ∫ΔDSC dT  (µW·°C → J/g)
 CONV_FACTOR = DT_DT / (M_SAMPLE * 1000)
 
-T_INT_LOW  = 30
-T_INT_HIGH = 100
+T_INT_LOW  = 50
+T_INT_HIGH = 70
 
 # ── Data loading ──────────────────────────────────────────────────────────
 def load_dsc_simple(filename, sheet=None):
@@ -212,8 +212,15 @@ def main():
         print(f"    Ramp {c['ramp_idx']:2d}: T1(80°C)={c['T1_hold_min']:8.4f} min, "
               f"T2(90°C)={c['T2_hold_min']:8.4f} min")
 
-    # ── 4. Compute ΔH for each ramp ─────────────────────────────────────
-    print(f"\n[3/4] Computing ΔH ({T_INT_LOW}–{T_INT_HIGH}°C) by direct heat-flow integration...")
+    # ── 4. Compute ΔH + Tg overshoot for each ramp ──────────────────────
+    # Tg overshoot: peak of ΔDSC above extrapolated liquid baseline
+    # This is where the Kovacs hump lives
+    T_LIQ_LO = 110  # °C  fit liquid baseline from here
+    T_LIQ_HI = 160  # °C  to here
+    T_TG_LO  = 75   # °C  Tg overshoot region
+    T_TG_HI  = 115  # °C
+
+    print(f"\n[3/4] Computing ΔH ({T_INT_LOW}–{T_INT_HIGH}°C) + Tg overshoot...")
 
     results = []
     dsc_curves = []
@@ -230,23 +237,42 @@ def main():
         # ΔDSC = sample - empty  (µW)
         delta_DSC = DSC_sample_grid - DSC_empty_grid
 
-        # Integrate over 30-100°C
+        # Total ΔH over user integration range
         int_mask = (T_grid >= T_INT_LOW) & (T_grid <= T_INT_HIGH)
         integral = trapezoid(delta_DSC[int_mask], T_grid[int_mask])  # µW·°C
         delta_H = abs(CONV_FACTOR * integral)  # J/g (endo-positive convention)
+
+        # ── Tg overshoot (Kovacs hump metric) ──
+        # Fit liquid baseline: linear fit to ΔDSC in [T_LIQ_LO, T_LIQ_HI]
+        liq_mask = (T_grid >= T_LIQ_LO) & (T_grid <= T_LIQ_HI)
+        coeffs = np.polyfit(T_grid[liq_mask], delta_DSC[liq_mask], 1)
+        liquid_baseline = np.polyval(coeffs, T_grid)
+
+        # Excess ΔDSC = measured - liquid baseline in Tg region
+        tg_mask = (T_grid >= T_TG_LO) & (T_grid <= T_TG_HI)
+        excess_DSC = delta_DSC[tg_mask] - liquid_baseline[tg_mask]
+
+        # Overshoot peak: max excess in Tg region (µW)
+        overshoot_peak = np.max(excess_DSC) if len(excess_DSC) > 0 else 0
+
+        # Excess enthalpy: integrate excess_DSC in Tg region → convert to J/g
+        excess_integral = trapezoid(excess_DSC, T_grid[tg_mask])  # µW·°C
+        excess_enthalpy = abs(CONV_FACTOR * excess_integral)  # J/g
 
         results.append({
             'ramp': ramp_idx + 1,
             'T1_hold_min': cond['T1_hold_min'],
             'T2_hold_min': cond['T2_hold_min'],
             'delta_H_Jg': delta_H,
-            'integral_uWC': integral,
+            'overshoot_peak_uW': overshoot_peak,
+            'excess_enthalpy_Jg': excess_enthalpy,
         })
         dsc_curves.append(delta_DSC)
 
         print(f"    Ramp {ramp_idx+1:2d}: t1={cond['T1_hold_min']:8.4f} min, "
               f"t2={cond['T2_hold_min']:8.4f} min → "
-              f"ΔH = {delta_H:.4f} J/g")
+              f"ΔH = {delta_H:.4f} J/g, overshoot = {overshoot_peak:.1f} µW, "
+              f"ΔH_ex = {excess_enthalpy:.4f} J/g")
 
     results_df = pd.DataFrame(results)
     dsc_curves = np.array(dsc_curves)
