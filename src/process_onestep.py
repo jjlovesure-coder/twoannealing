@@ -172,9 +172,16 @@ def process_onestep(data_file, sheet, T_anneal, label, out_name):
             'start_idx': s, 'end_idx': e,
         })
 
-    print(f"  Annealing conditions (hold @ {T_anneal}°C):")
+    # Filter sub-instrument-response times
+    MIN_HOLD = 0.1
+    conditions = [c for c in conditions if c['hold_min'] is not None and c['hold_min'] >= MIN_HOLD]
+    for i, c in enumerate(conditions):
+        c['ramp_idx'] = i + 1
+
+    print(f"  Annealing conditions (hold @ {T_anneal}°C, >= {MIN_HOLD} min):")
     for c in conditions:
         print(f"    Ramp {c['ramp_idx']:2d}: hold = {c['hold_min']:8.4f} min")
+    print(f"  Kept {len(conditions)}/{len(ramps)} ramps")
 
     # Compute raw integrals
     raw_integrals = []
@@ -187,14 +194,17 @@ def process_onestep(data_file, sheet, T_anneal, label, out_name):
         int_mask = (T_grid >= T_INT_LOW) & (T_grid <= T_INT_HIGH)
         raw_integrals.append(trapezoid(delta_DSC[int_mask], T_grid[int_mask]))
 
-    # Global reference + offset for positive values
-    ref_global = raw_integrals[0]
-    all_diffs = [(r - ref_global) * CONV_KJMOL for r in raw_integrals]
+    # Per-run reference (after filtering, first half = Run 1, second half = Run 2)
+    n = len(raw_integrals) // 2
+    ref_R1 = raw_integrals[0]
+    ref_R2 = raw_integrals[n] if n > 0 else ref_R1
+    all_diffs = [(r - (ref_R1 if i < n else ref_R2)) * CONV_KJMOL for i, r in enumerate(raw_integrals)]
     offset = max(0, -min(all_diffs)) + 1.0
     results = []
     for ramp_idx, cond in enumerate(conditions):
         integral = raw_integrals[ramp_idx]
-        delta_H_raw = (integral - ref_global) * CONV_KJMOL
+        ref = ref_R1 if ramp_idx < n else ref_R2
+        delta_H_raw = (integral - ref) * CONV_KJMOL
         delta_H = delta_H_raw + offset
         results.append({
             'ramp': ramp_idx + 1, 'hold_min': cond['hold_min'],
@@ -209,9 +219,10 @@ def process_onestep(data_file, sheet, T_anneal, label, out_name):
 
     # Panel 1: ΔH vs hold time
     ax1 = axes[0]
-    # Split into first 10 and second 10 (replicates)
-    r1 = results_df.iloc[:10]
-    r2 = results_df.iloc[10:]
+    # Split into Run 1 and Run 2 (replicates)
+    n_half = len(results_df) // 2
+    r1 = results_df.iloc[:n_half]
+    r2 = results_df.iloc[n_half:]
     ax1.plot(r1['hold_min'], r1['delta_H_kJmol'], 'o-', color='#2166AC', linewidth=1.8,
              markersize=9, markerfacecolor='white', markeredgewidth=1.5, label='Run 1')
     ax1.plot(r2['hold_min'], r2['delta_H_kJmol'], 's--', color='#B2182B', linewidth=1.8,
@@ -227,7 +238,7 @@ def process_onestep(data_file, sheet, T_anneal, label, out_name):
     # Panel 2: ΔH bar chart
     ax2 = axes[1]
     x_pos = np.arange(len(results_df))
-    bar_colors = ['#2166AC'] * 10 + ['#B2182B'] * 10
+    bar_colors = ['#2166AC'] * n_half + ['#B2182B'] * (len(results_df) - n_half)
     ax2.bar(x_pos, results_df['delta_H_kJmol'], color=bar_colors, edgecolor='black',
             linewidth=0.5, alpha=0.85)
     ax2.set_xticks(x_pos)
@@ -253,8 +264,8 @@ def process_onestep(data_file, sheet, T_anneal, label, out_name):
     print(f"  {'-'*35}")
     for _, r in results_df.iterrows():
         print(f"  {r['ramp']:<4.0f}  {r['hold_min']:>12.4f}  {r['delta_H_kJmol']:>12.2f}")
-    run1 = results_df.iloc[:10]
-    run2 = results_df.iloc[10:]
+    run1 = results_df.iloc[:n_half]
+    run2 = results_df.iloc[n_half:]
     print(f"\n  Run 1: ΔH = {run1['delta_H_kJmol'].min():.2f} – {run1['delta_H_kJmol'].max():.2f} kJ/mol")
     print(f"  Run 2: ΔH = {run2['delta_H_kJmol'].min():.2f} – {run2['delta_H_kJmol'].max():.2f} kJ/mol")
 

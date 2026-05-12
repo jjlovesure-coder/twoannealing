@@ -208,9 +208,16 @@ def main():
             'end_idx': e,
         })
 
+    # Filter: exclude sub-instrument-response annealing times
+    MIN_HOLD = 0.1
+    conditions = [c for c in conditions if c['T2_hold_min'] is not None and c['T2_hold_min'] >= MIN_HOLD]
+    for i, c in enumerate(conditions):
+        c['ramp_idx'] = i + 1
+
     for c in conditions:
         print(f"    Ramp {c['ramp_idx']:2d}: T1(80°C)={c['T1_hold_min']:8.4f} min, "
               f"T2(90°C)={c['T2_hold_min']:8.4f} min")
+    print(f"  Kept {len(conditions)}/{len(ramps)} ramps (T2 >= {MIN_HOLD} min)")
 
     # ── 4. Compute Tg overshoot enthalpy (Kovacs ΔH) ────────────────────
     # ΔH = excess DSC integral in [T_TG_LO, T_TG_HI] above DSC@T_REF baseline
@@ -286,8 +293,8 @@ def main():
 
     # Panel 1: ΔDSC curves (selected)
     ax1 = fig.add_subplot(2, 3, 1)
-    highlight = [0, 4, 9, 10, 14, 19]
-    labels_h = [1, 5, 10, 11, 15, 20]
+    highlight = [0, 2, 4, 5, 7, 9]
+    labels_h = ['A1','A3','A5','B1','B3','B5']
     for idx, lbl in zip(highlight, labels_h):
         c = conditions[idx]
         ax1.plot(T_grid, dsc_curves[idx], alpha=0.8, linewidth=0.8,

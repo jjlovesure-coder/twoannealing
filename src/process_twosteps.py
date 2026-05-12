@@ -203,9 +203,17 @@ def main():
             'end_idx': e,
         })
 
+    # Filter: exclude annealing times below instrument thermal response (~0.1 min)
+    MIN_HOLD = 0.1  # min
+    conditions = [c for c in conditions if c['T2_hold_min'] is not None and c['T2_hold_min'] >= MIN_HOLD]
+    # Reindex remaining ramps
+    for i, c in enumerate(conditions):
+        c['ramp_idx'] = i + 1
+
     for c in conditions:
         print(f"    Ramp {c['ramp_idx']:2d}: T1(90°C)={c['T1_hold_min']:8.4f} min, "
               f"T2(80°C)={c['T2_hold_min']:8.4f} min")
+    print(f"  Kept {len(conditions)}/{len(ramps)} ramps (T2 >= {MIN_HOLD} min)")
 
     # ── 4. Compute ΔH for each ramp ─────────────────────────────────────
     print(f"\n[3/4] Computing ΔH ({T_INT_LOW}–{T_INT_HIGH}°C) by direct heat-flow integration...")
@@ -262,8 +270,8 @@ def main():
 
     # Panel 1: ΔDSC curves
     ax1 = fig.add_subplot(2, 3, 1)
-    highlight = [0, 4, 9, 10, 14, 19]
-    labels_h = [1, 5, 10, 11, 15, 20]
+    highlight = [0, 2, 4, 5, 7, 9]
+    labels_h = ['A1','A3','A5','B1','B3','B5']
     for idx, lbl in zip(highlight, labels_h):
         c = conditions[idx]
         ax1.plot(T_grid, dsc_curves[idx], alpha=0.8, linewidth=0.8,
@@ -323,11 +331,12 @@ def main():
     ax4.set_ylabel(f'ΔH (kJ/mol)')
     ax4.set_xlabel('Ramp number')
     ax4.set_title('ΔH (released) distribution across all annealing conditions')
-    ax4.axvline(9.5, color='gray', linestyle='--', alpha=0.7)
+    mid = len(t1_short) - 0.5
+    ax4.axvline(mid, color='gray', linestyle='--', alpha=0.7)
     ylim = ax4.get_ylim()
-    ax4.text(4.5, ylim[1] * 0.98, 'T1=0.833 min', ha='center', fontsize=9,
+    ax4.text(mid/2, ylim[1] * 0.98, 'T1=0.833 min', ha='center', fontsize=9,
              fontweight='bold', color=colors_grp[0])
-    ax4.text(14.5, ylim[1] * 0.98, 'T1=8.333 min', ha='center', fontsize=9,
+    ax4.text(mid + len(t1_long)/2, ylim[1] * 0.98, 'T1=8.333 min', ha='center', fontsize=9,
              fontweight='bold', color=colors_grp[1])
 
     # Panel 5: Raw DSC curves on sample grid (selected)
