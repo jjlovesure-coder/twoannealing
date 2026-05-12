@@ -202,22 +202,25 @@ def main():
 
         conditions.append({
             'ramp_idx': idx + 1,
-            'T1_hold_min': t1_hold,
-            'T2_hold_min': t2_hold,
+            'T1_hold_s': t1_hold,
+            'T2_hold_s': t2_hold,
             'start_idx': s,
             'end_idx': e,
         })
 
-    # Filter: exclude sub-instrument-response annealing times
-    MIN_HOLD = 0.1
-    conditions = [c for c in conditions if c['T2_hold_min'] is not None and c['T2_hold_min'] >= MIN_HOLD]
+    # Convert to seconds and filter
+    MIN_HOLD = 0.1 * 60
+    for c in conditions:
+        c['T1_hold_s'] = c['T1_hold_s'] * 60 if c['T1_hold_s'] else None
+        c['T2_hold_s'] = c['T2_hold_s'] * 60 if c['T2_hold_s'] else None
+    conditions = [c for c in conditions if c['T2_hold_s'] is not None and c['T2_hold_s'] >= MIN_HOLD]
     for i, c in enumerate(conditions):
         c['ramp_idx'] = i + 1
 
     for c in conditions:
-        print(f"    Ramp {c['ramp_idx']:2d}: T1(80°C)={c['T1_hold_min']:8.4f} min, "
-              f"T2(90°C)={c['T2_hold_min']:8.4f} min")
-    print(f"  Kept {len(conditions)}/{len(ramps)} ramps (T2 >= {MIN_HOLD} min)")
+        print(f"    Ramp {c['ramp_idx']:2d}: T1(80°C)={c['T1_hold_s']:8.1f} s, "
+              f"T2(90°C)={c['T2_hold_s']:8.1f} s")
+    print(f"  Kept {len(conditions)}/{len(ramps)} ramps (T2 >= {MIN_HOLD:.0f} s)")
 
     # ── 4. Compute Tg overshoot enthalpy (Kovacs ΔH) ────────────────────
     # ΔH = excess DSC integral in [T_TG_LO, T_TG_HI] above DSC@T_REF baseline
@@ -258,8 +261,8 @@ def main():
 
         results.append({
             'ramp': ramp_idx + 1,
-            'T1_hold_min': cond['T1_hold_min'],
-            'T2_hold_min': cond['T2_hold_min'],
+            'T1_hold_s': cond['T1_hold_s'],
+            'T2_hold_s': cond['T2_hold_s'],
             'delta_H_kJmol': 0.0,  # placeholder, computed below
             'overshoot_peak_uW': overshoot_peak,
         })
@@ -273,8 +276,8 @@ def main():
         integral = raw_integrals[ramp_idx]
         delta_H_raw = -(integral - ref_global) * CONV_KJMOL
         results[ramp_idx]['delta_H_kJmol'] = delta_H_raw + offset
-        print(f"    Ramp {ramp_idx+1:2d}: t1={results[ramp_idx]['T1_hold_min']:8.4f} min, "
-              f"t2={results[ramp_idx]['T2_hold_min']:8.4f} min → "
+        print(f"    Ramp {ramp_idx+1:2d}: t1={results[ramp_idx]['T1_hold_s']:8.1f} s, "
+              f"t2={results[ramp_idx]['T2_hold_s']:8.1f} s → "
               f"ΔH = {results[ramp_idx]['delta_H_kJmol']:.2f} kJ/mol, "
               f"overshoot = {results[ramp_idx]['overshoot_peak_uW']:.1f} µW")
 
@@ -286,8 +289,8 @@ def main():
 
     fig = plt.figure(figsize=(20, 14))
 
-    t1_short = results_df[results_df['T1_hold_min'] < 1.0]
-    t1_long  = results_df[results_df['T1_hold_min'] > 1.0]
+    t1_short = results_df[results_df['T1_hold_s'] < 60]
+    t1_long  = results_df[results_df['T1_hold_s'] > 60]
     colors_grp = ['#2166AC', '#B2182B']
     markers = ['o', 's']
 
@@ -298,7 +301,7 @@ def main():
     for idx, lbl in zip(highlight, labels_h):
         c = conditions[idx]
         ax1.plot(T_grid, dsc_curves[idx], alpha=0.8, linewidth=0.8,
-                 label=f"R{lbl}: t1={c['T1_hold_min']:.3f},t2={c['T2_hold_min']:.3f}")
+                 label=f"R{lbl}: t1={c['T1_hold_s']:.3f},t2={c['T2_hold_s']:.3f}")
     ax1.axvspan(T_TG_LO, T_TG_HI, alpha=0.08, color='green')
     ax1.set_xlabel('Temperature (°C)')
     ax1.set_ylabel('ΔDSC (sample − empty) (µW)')
@@ -316,9 +319,9 @@ def main():
     for idx in t1l_idx:
         ax2.plot(T_grid, dsc_curves[idx], alpha=0.4, linewidth=0.5, color=colors_grp[1])
     ax2.plot(T_grid, dsc_curves[t1s_idx].mean(axis=0), '-', color=colors_grp[0], linewidth=2.0,
-             label=f'T1=0.833 min (n={len(t1s_idx)})')
+             label=f'T1=50 s (n={len(t1s_idx)})')
     ax2.plot(T_grid, dsc_curves[t1l_idx].mean(axis=0), '-', color=colors_grp[1], linewidth=2.0,
-             label=f'T1=8.333 min (n={len(t1l_idx)})')
+             label=f'T1=500 s (n={len(t1l_idx)})')
     ax2.axvspan(T_TG_LO, T_TG_HI, alpha=0.08, color='green')
     ax2.set_xlabel('Temperature (°C)')
     ax2.set_ylabel('ΔDSC (µW)')
@@ -328,12 +331,12 @@ def main():
 
     # Panel 3: ΔH (overshoot enthalpy) vs T2 — KOVACS HUMP!
     ax3 = fig.add_subplot(2, 3, 3)
-    for i, (grp_label, grp_df) in enumerate([('T1=0.833 min', t1_short), ('T1=8.333 min', t1_long)]):
-        ax3.plot(grp_df['T2_hold_min'], grp_df['delta_H_kJmol'],
+    for i, (grp_label, grp_df) in enumerate([('T1=50 s', t1_short), ('T1=500 s', t1_long)]):
+        ax3.plot(grp_df['T2_hold_s'], grp_df['delta_H_kJmol'],
                  marker=markers[i], color=colors_grp[i], linewidth=1.8,
                  markersize=9, markerfacecolor='white',
                  markeredgewidth=1.5, label=grp_label)
-    ax3.set_xlabel('T2 hold time at 90°C (min)')
+    ax3.set_xlabel('T2 hold time at 90°C (s)')
     ax3.set_ylabel(f'ΔH (kJ/mol)')
     ax3.set_title('Kovacs hump: Released enthalpy vs up-jump time')
     ax3.set_xscale('log')
@@ -343,12 +346,12 @@ def main():
 
     # Panel 4: Overshoot peak vs T2 — confirmation
     ax4 = fig.add_subplot(2, 3, 4)
-    for i, (grp_label, grp_df) in enumerate([('T1=0.833 min', t1_short), ('T1=8.333 min', t1_long)]):
-        ax4.plot(grp_df['T2_hold_min'], grp_df['overshoot_peak_uW'],
+    for i, (grp_label, grp_df) in enumerate([('T1=50 s', t1_short), ('T1=500 s', t1_long)]):
+        ax4.plot(grp_df['T2_hold_s'], grp_df['overshoot_peak_uW'],
                  marker=markers[i], color=colors_grp[i], linewidth=1.8,
                  markersize=9, markerfacecolor='white',
                  markeredgewidth=1.5, label=grp_label)
-    ax4.set_xlabel('T2 hold time at 90°C (min)')
+    ax4.set_xlabel('T2 hold time at 90°C (s)')
     ax4.set_ylabel('Overshoot peak (µW)')
     ax4.set_title('Kovacs hump: Tg overshoot peak vs up-jump time')
     ax4.set_xscale('log')
@@ -376,12 +379,12 @@ def main():
     for _, r in results_df.iterrows():
         table_data.append([
             f"{r['ramp']:.0f}",
-            f"{r['T1_hold_min']:.3f}",
-            f"{r['T2_hold_min']:.3f}",
+            f"{r['T1_hold_s']:.3f}",
+            f"{r['T2_hold_s']:.3f}",
             f"{r['delta_H_kJmol']:.2f}",
             f"{r['overshoot_peak_uW']:.1f}",
         ])
-    col_labels = ['Ramp', 't1@80°C\n(min)', 't2@90°C\n(min)', 'ΔH\n(kJ/mol)', 'overshoot\npeak (µW)']
+    col_labels = ['Ramp', 't1@80°C\n(s)', 't2@90°C\n(s)', 'ΔH\n(kJ/mol)', 'overshoot\npeak (µW)']
 
     table = ax6.table(cellText=table_data, colLabels=col_labels,
                       cellLoc='center', loc='center',
@@ -413,21 +416,21 @@ def main():
     print(f"  Method: overshoot enthalpy ({T_TG_LO}–{T_TG_HI}°C, ref @ {T_REF}°C), kJ/mol")
     print("=" * 70)
     print(f"\n{'Ramp':<6} {'t1@80°C':>10}  {'t2@90°C':>10}  {'ΔH':>10}  {'overshoot':>10}")
-    print(f"{'':6} {'(min)':>10}  {'(min)':>10}  {'(kJ/mol)':>10}  {'peak (µW)':>10}")
+    print(f"{'':6} {'(s)':>10}  {'(s)':>10}  {'(kJ/mol)':>10}  {'peak (µW)':>10}")
     print("-" * 55)
     for _, r in results_df.iterrows():
-        print(f"  {r['ramp']:<4.0f}  {r['T1_hold_min']:>10.4f}  {r['T2_hold_min']:>10.4f}  "
+        print(f"  {r['ramp']:<4.0f}  {r['T1_hold_s']:>10.4f}  {r['T2_hold_s']:>10.4f}  "
               f"{r['delta_H_kJmol']:>10.2f}  {r['overshoot_peak_uW']:>10.1f}")
     print("-" * 55)
 
-    grp_a = results_df[results_df['T1_hold_min'] < 1.0]
-    grp_b = results_df[results_df['T1_hold_min'] > 1.0]
+    grp_a = results_df[results_df['T1_hold_s'] < 60]
+    grp_b = results_df[results_df['T1_hold_s'] > 60]
 
-    print(f"\n  Group A (T1@80°C = 0.833 min, short):")
+    print(f"\n  Group A (T1@80°C = 50 s, short):")
     print(f"    ΔH: {grp_a['delta_H_kJmol'].min():.2f} – {grp_a['delta_H_kJmol'].max():.2f} kJ/mol")
     print(f"    Overshoot peak: {grp_a['overshoot_peak_uW'].min():.1f} – {grp_a['overshoot_peak_uW'].max():.1f} µW")
 
-    print(f"\n  Group B (T1@80°C = 8.333 min, long):")
+    print(f"\n  Group B (T1@80°C = 500 s, long):")
     print(f"    ΔH: {grp_b['delta_H_kJmol'].min():.2f} – {grp_b['delta_H_kJmol'].max():.2f} kJ/mol")
     print(f"    Overshoot peak: {grp_b['overshoot_peak_uW'].min():.1f} – {grp_b['overshoot_peak_uW'].max():.1f} µW")
 

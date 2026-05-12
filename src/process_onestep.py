@@ -168,19 +168,21 @@ def process_onestep(data_file, sheet, T_anneal, label, out_name):
         else:
             t_hold = None
         conditions.append({
-            'ramp_idx': idx + 1, 'hold_min': t_hold,
+            'ramp_idx': idx + 1, 'hold_s': t_hold,
             'start_idx': s, 'end_idx': e,
         })
 
-    # Filter sub-instrument-response times
-    MIN_HOLD = 0.1
-    conditions = [c for c in conditions if c['hold_min'] is not None and c['hold_min'] >= MIN_HOLD]
+    # Convert to seconds and filter
+    MIN_HOLD = 0.1 * 60
+    for c in conditions:
+        c['hold_s'] = c['hold_s'] * 60 if c['hold_s'] else None
+    conditions = [c for c in conditions if c['hold_s'] is not None and c['hold_s'] >= MIN_HOLD]
     for i, c in enumerate(conditions):
         c['ramp_idx'] = i + 1
 
-    print(f"  Annealing conditions (hold @ {T_anneal}°C, >= {MIN_HOLD} min):")
+    print(f"  Annealing conditions (hold @ {T_anneal}°C, >= {MIN_HOLD:.0f} s):")
     for c in conditions:
-        print(f"    Ramp {c['ramp_idx']:2d}: hold = {c['hold_min']:8.4f} min")
+        print(f"    Ramp {c['ramp_idx']:2d}: hold = {c['hold_s']:8.1f} s")
     print(f"  Kept {len(conditions)}/{len(ramps)} ramps")
 
     # Compute raw integrals
@@ -205,10 +207,10 @@ def process_onestep(data_file, sheet, T_anneal, label, out_name):
         delta_H_raw = (integral - ref_global) * CONV_KJMOL
         delta_H = delta_H_raw + offset
         results.append({
-            'ramp': ramp_idx + 1, 'hold_min': cond['hold_min'],
+            'ramp': ramp_idx + 1, 'hold_s': cond['hold_s'],
             'delta_H_kJmol': delta_H,
         })
-        print(f"    Ramp {ramp_idx+1:2d}: hold = {cond['hold_min']:8.4f} min → ΔH = {delta_H:.2f} kJ/mol")
+        print(f"    Ramp {ramp_idx+1:2d}: hold = {cond['hold_s']:8.1f} s → ΔH = {delta_H:.2f} kJ/mol")
 
     results_df = pd.DataFrame(results)
 
@@ -221,11 +223,11 @@ def process_onestep(data_file, sheet, T_anneal, label, out_name):
     n_half = len(results_df) // 2
     r1 = results_df.iloc[:n_half]
     r2 = results_df.iloc[n_half:]
-    ax1.plot(r1['hold_min'], r1['delta_H_kJmol'], 'o-', color='#2166AC', linewidth=1.8,
+    ax1.plot(r1['hold_s'], r1['delta_H_kJmol'], 'o-', color='#2166AC', linewidth=1.8,
              markersize=9, markerfacecolor='white', markeredgewidth=1.5, label='cooling 50s')
-    ax1.plot(r2['hold_min'], r2['delta_H_kJmol'], 's--', color='#B2182B', linewidth=1.8,
+    ax1.plot(r2['hold_s'], r2['delta_H_kJmol'], 's--', color='#B2182B', linewidth=1.8,
              markersize=9, markerfacecolor='white', markeredgewidth=1.5, label='cooling 500s')
-    ax1.set_xlabel(f'Hold time at {T_anneal}°C (min)')
+    ax1.set_xlabel(f'Hold time at {T_anneal}°C (s)')
     ax1.set_ylabel(f'ΔH (kJ/mol)')
     ax1.set_title(f'{label}: Released enthalpy vs annealing time')
     ax1.set_xscale('log')
@@ -240,10 +242,10 @@ def process_onestep(data_file, sheet, T_anneal, label, out_name):
     ax2.bar(x_pos, results_df['delta_H_kJmol'], color=bar_colors, edgecolor='black',
             linewidth=0.5, alpha=0.85)
     ax2.set_xticks(x_pos)
-    ax2.set_xticklabels([f"{r['hold_min']:.3f}" for _, r in results_df.iterrows()],
+    ax2.set_xticklabels([f"{r['hold_s']:.3f}" for _, r in results_df.iterrows()],
                         fontsize=6, rotation=45)
     ax2.set_ylabel(f'ΔH (kJ/mol)')
-    ax2.set_xlabel(f'Hold time at {T_anneal}°C (min)')
+    ax2.set_xlabel(f'Hold time at {T_anneal}°C (s)')
     ax2.set_title(f'{label}: ΔH distribution')
     ax2.axvline(9.5, color='gray', linestyle='--', alpha=0.5)
 
@@ -261,7 +263,7 @@ def process_onestep(data_file, sheet, T_anneal, label, out_name):
     print(f"  {'Ramp':<6} {'hold@' + str(T_anneal) + '°C':>12}  {'ΔH (kJ/mol)':>12}")
     print(f"  {'-'*35}")
     for _, r in results_df.iterrows():
-        print(f"  {r['ramp']:<4.0f}  {r['hold_min']:>12.4f}  {r['delta_H_kJmol']:>12.2f}")
+        print(f"  {r['ramp']:<4.0f}  {r['hold_s']:>12.4f}  {r['delta_H_kJmol']:>12.2f}")
     run1 = results_df.iloc[:n_half]
     run2 = results_df.iloc[n_half:]
     print(f"\n  cooling 50s: ΔH = {run1['delta_H_kJmol'].min():.2f} – {run1['delta_H_kJmol'].max():.2f} kJ/mol")
