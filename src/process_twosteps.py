@@ -219,43 +219,43 @@ def main():
     # ── 4. Compute ΔH for each ramp ─────────────────────────────────────
     print(f"\n[3/4] Computing ΔH ({T_INT_LOW}–{T_INT_HIGH}°C) by direct heat-flow integration...")
 
-    results = []
+    raw_integrals = []
     dsc_curves = []
 
     for ramp_idx, cond in enumerate(conditions):
         s, e = cond['start_idx'], cond['end_idx']
         T_seg = T_exp[s:e+1]
         DSC_seg = DSC_exp[s:e+1]
-
-        # Interpolate DSC to T_grid
         interp_dsc = interp1d(T_seg, DSC_seg, kind='linear',
                               bounds_error=False, fill_value='extrapolate')
         DSC_sample_grid = interp_dsc(T_grid)
-
-        # ΔDSC = sample - empty  (µW)
         delta_DSC = DSC_sample_grid - DSC_empty_grid
-
-        # Integrate over 30-100°C
         int_mask = (T_grid >= T_INT_LOW) & (T_grid <= T_INT_HIGH)
         integral = trapezoid(delta_DSC[int_mask], T_grid[int_mask])  # µW·°C
-        delta_H_kJmol = CONV_KJMOL * integral  # kJ/mol (signed, endothermic = negative)
+        raw_integrals.append(integral)
+        dsc_curves.append(delta_DSC)
+        print(f"    Ramp {ramp_idx+1:2d}: t1={cond['T1_hold_min']:8.4f} min, "
+              f"t2={cond['T2_hold_min']:8.4f} min → "
+              f"raw integral = {integral:.1f} µW·°C")
 
-        # Average cp estimated from raw DSC: cp ≈ ΔDSC / (M_SAMPLE * 1000 * BETA)  → J/(g·K)
-        # Actually compute directly: cp = CONV_FACTOR * (delta_DSC / DT_DT) per point, then average
-        cp_est = CONV_FACTOR * delta_DSC / DT_DT
+    # Reference: shortest T2 anneal in each group (ramp 1 for group A, ramp 11 for group B)
+    ref_A = raw_integrals[0]
+    ref_B = raw_integrals[10]
 
+    results = []
+    for ramp_idx, cond in enumerate(conditions):
+        integral = raw_integrals[ramp_idx]
+        ref = ref_A if ramp_idx < 10 else ref_B
+        # ΔH = -(integral - ref) × CONV_KJMOL  → positive kJ/mol, released enthalpy
+        delta_H_kJmol = (integral - ref) * CONV_KJMOL
         results.append({
             'ramp': ramp_idx + 1,
             'T1_hold_min': cond['T1_hold_min'],
             'T2_hold_min': cond['T2_hold_min'],
-            'delta_H_Jg': delta_H,
-            'integral_uWC': integral,
+            'delta_H_kJmol': delta_H_kJmol,
         })
-        dsc_curves.append(delta_DSC)
-
-        print(f"    Ramp {ramp_idx+1:2d}: t1={cond['T1_hold_min']:8.4f} min, "
-              f"t2={cond['T2_hold_min']:8.4f} min → "
-              f"ΔH = {delta_H:.4f} J/g")
+        trend_sym = '+' if delta_H_kJmol > 0 else ''
+        print(f"      → ΔH = {trend_sym}{delta_H_kJmol:.2f} kJ/mol (ref: shortest T2 in group)")
 
     results_df = pd.DataFrame(results)
     dsc_curves = np.array(dsc_curves)
@@ -305,16 +305,16 @@ def main():
     ax2.legend(fontsize=8)
     ax2.set_xlim(28, T_grid[-1] + 2)
 
-    # Panel 3: ΔH vs T2 annealing time
+    # Panel 3: ΔH vs T2 annealing time (kJ/mol, positive, increasing)
     ax3 = fig.add_subplot(2, 3, 3)
     for i, (grp_label, grp_df) in enumerate([('T1=0.833 min', t1_short), ('T1=8.333 min', t1_long)]):
-        ax3.plot(grp_df['T2_hold_min'], grp_df['delta_H_Jg'],
+        ax3.plot(grp_df['T2_hold_min'], grp_df['delta_H_kJmol'],
                  marker=markers[i], color=colors_grp[i], linewidth=1.8,
                  markersize=9, markerfacecolor='white',
                  markeredgewidth=1.5, label=grp_label)
     ax3.set_xlabel('T2 hold time at 80°C (min)')
-    ax3.set_ylabel(f'ΔH (30–100°C) (J/g)')
-    ax3.set_title('Enthalpy recovery vs T2 annealing time')
+    ax3.set_ylabel(f'ΔH ({T_INT_LOW}–{T_INT_HIGH}°C) (kJ/mol)')
+    ax3.set_title('Released enthalpy vs T2 annealing time')
     ax3.set_xscale('log')
     ax3.legend(fontsize=9)
     ax3.grid(True, alpha=0.3, which='both')
@@ -324,14 +324,14 @@ def main():
     x_pos = np.arange(len(results_df))
     bar_colors = [colors_grp[0] if t < 1.0 else colors_grp[1]
                   for t in results_df['T1_hold_min']]
-    ax4.bar(x_pos, results_df['delta_H_Jg'], color=bar_colors,
+    ax4.bar(x_pos, results_df['delta_H_kJmol'], color=bar_colors,
             edgecolor='black', linewidth=0.5, alpha=0.85)
     ax4.set_xticks(x_pos)
     ax4.set_xticklabels([f"{r['ramp']:.0f}" for _, r in results_df.iterrows()],
                         fontsize=7, rotation=45)
-    ax4.set_ylabel(f'ΔH (30–100°C) (J/g)')
+    ax4.set_ylabel(f'ΔH (kJ/mol)')
     ax4.set_xlabel('Ramp number')
-    ax4.set_title('ΔH distribution across all annealing conditions')
+    ax4.set_title('ΔH (released) distribution across all annealing conditions')
     ax4.axvline(9.5, color='gray', linestyle='--', alpha=0.7)
     ylim = ax4.get_ylim()
     ax4.text(4.5, ylim[1] * 0.98, 'T1=0.833 min', ha='center', fontsize=9,
@@ -360,9 +360,9 @@ def main():
             f"{r['ramp']:.0f}",
             f"{r['T1_hold_min']:.3f}",
             f"{r['T2_hold_min']:.3f}",
-            f"{r['delta_H_Jg']:.3f}",
+            f"{r['delta_H_kJmol']:.2f}",
         ])
-    col_labels = ['Ramp', 't1@90°C\n(min)', 't2@80°C\n(min)', 'ΔH\n(J/g)']
+    col_labels = ['Ramp', 't1@90°C\n(min)', 't2@80°C\n(min)', 'ΔH\n(kJ/mol)']
 
     table = ax6.table(cellText=table_data, colLabels=col_labels,
                       cellLoc='center', loc='center',
@@ -391,29 +391,32 @@ def main():
     # ── Print summary ─────────────────────────────────────────────────────
     print("\n" + "=" * 70)
     print("  RESULTS SUMMARY — Two-step annealing of Polystyrene")
-    print(f"  Method: direct heat-flow integration ({T_INT_LOW}–{T_INT_HIGH}°C)")
+    print(f"  Method: direct heat-flow integration ({T_INT_LOW}–{T_INT_HIGH}°C), kJ/mol")
+    print(f"  ΔH = released enthalpy relative to shortest T2 anneal in each group")
     print("=" * 70)
     print(f"\n{'Ramp':<6} {'t1@90°C':>10}  {'t2@80°C':>10}  {'ΔH':>10}")
-    print(f"{'':6} {'(min)':>10}  {'(min)':>10}  {'(J/g)':>10}")
+    print(f"{'':6} {'(min)':>10}  {'(min)':>10}  {'(kJ/mol)':>10}")
     print("-" * 45)
     for _, r in results_df.iterrows():
         print(f"  {r['ramp']:<4.0f}  {r['T1_hold_min']:>10.4f}  {r['T2_hold_min']:>10.4f}  "
-              f"{r['delta_H_Jg']:>10.4f}")
+              f"{r['delta_H_kJmol']:>10.2f}")
     print("-" * 45)
 
     grp_a = results_df[results_df['T1_hold_min'] < 1.0]
     grp_b = results_df[results_df['T1_hold_min'] > 1.0]
 
     print(f"\n  Group A (T1@90°C = 0.833 min):")
-    print(f"    ΔH: {grp_a['delta_H_Jg'].min():.4f} – {grp_a['delta_H_Jg'].max():.4f} J/g")
-    print(f"    ΔH mean ± std: {grp_a['delta_H_Jg'].mean():.4f} ± {grp_a['delta_H_Jg'].std():.4f} J/g")
+    print(f"    ΔH: {grp_a['delta_H_kJmol'].min():.2f} – {grp_a['delta_H_kJmol'].max():.2f} kJ/mol")
+    print(f"    ΔH mean ± std: {grp_a['delta_H_kJmol'].mean():.2f} ± {grp_a['delta_H_kJmol'].std():.2f} kJ/mol")
 
     print(f"\n  Group B (T1@90°C = 8.333 min):")
-    print(f"    ΔH: {grp_b['delta_H_Jg'].min():.4f} – {grp_b['delta_H_Jg'].max():.4f} J/g")
-    print(f"    ΔH mean ± std: {grp_b['delta_H_Jg'].mean():.4f} ± {grp_b['delta_H_Jg'].std():.4f} J/g")
+    print(f"    ΔH: {grp_b['delta_H_kJmol'].min():.2f} – {grp_b['delta_H_kJmol'].max():.2f} kJ/mol")
+    print(f"    ΔH mean ± std: {grp_b['delta_H_kJmol'].mean():.2f} ± {grp_b['delta_H_kJmol'].std():.2f} kJ/mol")
 
-    print(f"\n  Δ(ΔH) between groups: {grp_a['delta_H_Jg'].mean() - grp_b['delta_H_Jg'].mean():.4f} J/g (A − B)")
-    print(f"  Overall ΔH range: {results_df['delta_H_Jg'].min():.4f} – {results_df['delta_H_Jg'].max():.4f} J/g")
+    a_max = grp_a['delta_H_kJmol'].max()
+    b_max = grp_b['delta_H_kJmol'].max()
+    print(f"\n  Max ΔH Group A: {a_max:.2f} kJ/mol")
+    print(f"  Max ΔH Group B: {b_max:.2f} kJ/mol")
 
     return results_df
 

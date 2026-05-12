@@ -21,6 +21,8 @@ HEATING_RATE = 10.0
 BETA = HEATING_RATE / 60.0
 DT_DT = 1.0 / BETA
 CONV_FACTOR = DT_DT / (M_SAMPLE * 1000)
+MW = 280000
+CONV_KJMOL = CONV_FACTOR * MW / 1000
 
 T_INT_LOW  = 35
 T_INT_HIGH = 95
@@ -174,8 +176,8 @@ def process_onestep(data_file, sheet, T_anneal, label, out_name):
     for c in conditions:
         print(f"    Ramp {c['ramp_idx']:2d}: hold = {c['hold_min']:8.4f} min")
 
-    # Compute ΔH
-    results = []
+    # Compute raw integrals
+    raw_integrals = []
     for ramp_idx, cond in enumerate(conditions):
         s, e = cond['start_idx'], cond['end_idx']
         T_seg = T_exp[s:e+1]; DSC_seg = DSC_exp[s:e+1]
@@ -183,12 +185,21 @@ def process_onestep(data_file, sheet, T_anneal, label, out_name):
                               bounds_error=False, fill_value='extrapolate')
         delta_DSC = interp_dsc(T_grid) - DSC_empty_grid
         int_mask = (T_grid >= T_INT_LOW) & (T_grid <= T_INT_HIGH)
-        delta_H = abs(CONV_FACTOR * trapezoid(delta_DSC[int_mask], T_grid[int_mask]))
+        raw_integrals.append(trapezoid(delta_DSC[int_mask], T_grid[int_mask]))
+
+    # Reference-based ΔH: ΔH = -(integral - ref) × CONV_KJMOL (positive, released)
+    ref_R1 = raw_integrals[0]
+    ref_R2 = raw_integrals[10]
+    results = []
+    for ramp_idx, cond in enumerate(conditions):
+        integral = raw_integrals[ramp_idx]
+        ref = ref_R1 if ramp_idx < 10 else ref_R2
+        delta_H = (integral - ref) * CONV_KJMOL
         results.append({
             'ramp': ramp_idx + 1, 'hold_min': cond['hold_min'],
-            'delta_H_Jg': delta_H,
+            'delta_H_kJmol': delta_H,
         })
-        print(f"    Ramp {ramp_idx+1:2d}: hold = {cond['hold_min']:8.4f} min → ΔH = {delta_H:.4f} J/g")
+        print(f"    Ramp {ramp_idx+1:2d}: hold = {cond['hold_min']:8.4f} min → ΔH = {delta_H:.2f} kJ/mol")
 
     results_df = pd.DataFrame(results)
 
@@ -200,13 +211,13 @@ def process_onestep(data_file, sheet, T_anneal, label, out_name):
     # Split into first 10 and second 10 (replicates)
     r1 = results_df.iloc[:10]
     r2 = results_df.iloc[10:]
-    ax1.plot(r1['hold_min'], r1['delta_H_Jg'], 'o-', color='#2166AC', linewidth=1.8,
+    ax1.plot(r1['hold_min'], r1['delta_H_kJmol'], 'o-', color='#2166AC', linewidth=1.8,
              markersize=9, markerfacecolor='white', markeredgewidth=1.5, label='Run 1')
-    ax1.plot(r2['hold_min'], r2['delta_H_Jg'], 's--', color='#B2182B', linewidth=1.8,
+    ax1.plot(r2['hold_min'], r2['delta_H_kJmol'], 's--', color='#B2182B', linewidth=1.8,
              markersize=9, markerfacecolor='white', markeredgewidth=1.5, label='Run 2')
     ax1.set_xlabel(f'Hold time at {T_anneal}°C (min)')
-    ax1.set_ylabel(f'ΔH ({T_INT_LOW}–{T_INT_HIGH}°C) (J/g)')
-    ax1.set_title(f'{label}: Enthalpy recovery vs annealing time')
+    ax1.set_ylabel(f'ΔH (kJ/mol)')
+    ax1.set_title(f'{label}: Released enthalpy vs annealing time')
     ax1.set_xscale('log')
     ax1.legend(fontsize=9)
     ax1.grid(True, alpha=0.3, which='both')
@@ -215,12 +226,12 @@ def process_onestep(data_file, sheet, T_anneal, label, out_name):
     ax2 = axes[1]
     x_pos = np.arange(len(results_df))
     bar_colors = ['#2166AC'] * 10 + ['#B2182B'] * 10
-    ax2.bar(x_pos, results_df['delta_H_Jg'], color=bar_colors, edgecolor='black',
+    ax2.bar(x_pos, results_df['delta_H_kJmol'], color=bar_colors, edgecolor='black',
             linewidth=0.5, alpha=0.85)
     ax2.set_xticks(x_pos)
     ax2.set_xticklabels([f"{r['hold_min']:.3f}" for _, r in results_df.iterrows()],
                         fontsize=6, rotation=45)
-    ax2.set_ylabel(f'ΔH ({T_INT_LOW}–{T_INT_HIGH}°C) (J/g)')
+    ax2.set_ylabel(f'ΔH (kJ/mol)')
     ax2.set_xlabel(f'Hold time at {T_anneal}°C (min)')
     ax2.set_title(f'{label}: ΔH distribution')
     ax2.axvline(9.5, color='gray', linestyle='--', alpha=0.5)
@@ -236,14 +247,14 @@ def process_onestep(data_file, sheet, T_anneal, label, out_name):
 
     # Summary
     print(f"\n  Results ({label}):")
-    print(f"  {'Ramp':<6} {'hold@' + str(T_anneal) + '°C':>12}  {'ΔH (J/g)':>10}")
+    print(f"  {'Ramp':<6} {'hold@' + str(T_anneal) + '°C':>12}  {'ΔH (kJ/mol)':>12}")
     print(f"  {'-'*35}")
     for _, r in results_df.iterrows():
-        print(f"  {r['ramp']:<4.0f}  {r['hold_min']:>12.4f}  {r['delta_H_Jg']:>10.4f}")
+        print(f"  {r['ramp']:<4.0f}  {r['hold_min']:>12.4f}  {r['delta_H_kJmol']:>12.2f}")
     run1 = results_df.iloc[:10]
     run2 = results_df.iloc[10:]
-    print(f"\n  Run 1: ΔH = {run1['delta_H_Jg'].min():.4f} – {run1['delta_H_Jg'].max():.4f} J/g")
-    print(f"  Run 2: ΔH = {run2['delta_H_Jg'].min():.4f} – {run2['delta_H_Jg'].max():.4f} J/g")
+    print(f"\n  Run 1: ΔH = {run1['delta_H_kJmol'].min():.2f} – {run1['delta_H_kJmol'].max():.2f} kJ/mol")
+    print(f"  Run 2: ΔH = {run2['delta_H_kJmol'].min():.2f} – {run2['delta_H_kJmol'].max():.2f} kJ/mol")
 
     return results_df
 
