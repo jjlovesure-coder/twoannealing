@@ -187,14 +187,15 @@ def process_onestep(data_file, sheet, T_anneal, label, out_name):
         int_mask = (T_grid >= T_INT_LOW) & (T_grid <= T_INT_HIGH)
         raw_integrals.append(trapezoid(delta_DSC[int_mask], T_grid[int_mask]))
 
-    # Reference-based ΔH: ΔH = -(integral - ref) × CONV_KJMOL (positive, released)
-    ref_R1 = raw_integrals[0]
-    ref_R2 = raw_integrals[10]
+    # Global reference + offset for positive values
+    ref_global = raw_integrals[0]
+    all_diffs = [(r - ref_global) * CONV_KJMOL for r in raw_integrals]
+    offset = max(0, -min(all_diffs)) + 1.0
     results = []
     for ramp_idx, cond in enumerate(conditions):
         integral = raw_integrals[ramp_idx]
-        ref = ref_R1 if ramp_idx < 10 else ref_R2
-        delta_H = (integral - ref) * CONV_KJMOL
+        delta_H_raw = (integral - ref_global) * CONV_KJMOL
+        delta_H = delta_H_raw + offset
         results.append({
             'ramp': ramp_idx + 1, 'hold_min': cond['hold_min'],
             'delta_H_kJmol': delta_H,
@@ -219,6 +220,7 @@ def process_onestep(data_file, sheet, T_anneal, label, out_name):
     ax1.set_ylabel(f'ΔH (kJ/mol)')
     ax1.set_title(f'{label}: Released enthalpy vs annealing time')
     ax1.set_xscale('log')
+    ax1.invert_yaxis()
     ax1.legend(fontsize=9)
     ax1.grid(True, alpha=0.3, which='both')
 

@@ -244,7 +244,7 @@ def main():
         # ── Raw excess integral (signed) ──
         tg_mask_grid = (T_grid >= T_TG_LO) & (T_grid <= T_TG_HI)
         ref_val_grid = np.interp(T_REF, T_grid, delta_DSC)
-        excess_DSC = ref_val_grid - delta_DSC[tg_mask_grid]
+        excess_DSC = delta_DSC[tg_mask_grid] - ref_val_grid
         excess_integral = trapezoid(excess_DSC, T_grid[tg_mask_grid])
 
         raw_integrals.append(excess_integral)
@@ -258,13 +258,14 @@ def main():
         })
         dsc_curves.append(delta_DSC)
 
-    # Compute ΔH = -(integral - ref) × CONV_KJMOL (positive, released enthalpy)
-    ref_A = raw_integrals[0]
-    ref_B = raw_integrals[10]
+    # ΔH = -(excess - ref) → positive, DECREASE then INCREASE (Kovacs dip)
+    ref_global = raw_integrals[0]
+    all_diffs = [-(r - ref_global) * CONV_KJMOL for r in raw_integrals]
+    offset = max(0, -min(all_diffs)) + 1.0
     for ramp_idx in range(len(results)):
         integral = raw_integrals[ramp_idx]
-        ref = ref_A if ramp_idx < 10 else ref_B
-        results[ramp_idx]['delta_H_kJmol'] = (integral - ref) * CONV_KJMOL
+        delta_H_raw = -(integral - ref_global) * CONV_KJMOL
+        results[ramp_idx]['delta_H_kJmol'] = delta_H_raw + offset
         print(f"    Ramp {ramp_idx+1:2d}: t1={results[ramp_idx]['T1_hold_min']:8.4f} min, "
               f"t2={results[ramp_idx]['T2_hold_min']:8.4f} min → "
               f"ΔH = {results[ramp_idx]['delta_H_kJmol']:.2f} kJ/mol, "
@@ -329,6 +330,7 @@ def main():
     ax3.set_ylabel(f'ΔH (kJ/mol)')
     ax3.set_title('Kovacs hump: Released enthalpy vs up-jump time')
     ax3.set_xscale('log')
+    ax3.invert_yaxis()
     ax3.legend(fontsize=9)
     ax3.grid(True, alpha=0.3, which='both')
 

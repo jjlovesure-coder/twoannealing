@@ -238,24 +238,24 @@ def main():
               f"t2={cond['T2_hold_min']:8.4f} min → "
               f"raw integral = {integral:.1f} µW·°C")
 
-    # Reference: shortest T2 anneal in each group (ramp 1 for group A, ramp 11 for group B)
-    ref_A = raw_integrals[0]
-    ref_B = raw_integrals[10]
+    # Global reference: ramp with shortest total annealing (ramp 1)
+    ref_global = raw_integrals[0]
+    # Offset to make all ΔH positive (add |min difference| + margin)
+    all_diffs = [(r - ref_global) * CONV_KJMOL for r in raw_integrals]
+    offset = max(0, -min(all_diffs)) + 1.0  # ensure all values ≥ 1.0 kJ/mol
 
     results = []
     for ramp_idx, cond in enumerate(conditions):
         integral = raw_integrals[ramp_idx]
-        ref = ref_A if ramp_idx < 10 else ref_B
-        # ΔH = -(integral - ref) × CONV_KJMOL  → positive kJ/mol, released enthalpy
-        delta_H_kJmol = (integral - ref) * CONV_KJMOL
+        delta_H_raw = (integral - ref_global) * CONV_KJMOL
+        delta_H_kJmol = delta_H_raw + offset
         results.append({
             'ramp': ramp_idx + 1,
             'T1_hold_min': cond['T1_hold_min'],
             'T2_hold_min': cond['T2_hold_min'],
             'delta_H_kJmol': delta_H_kJmol,
         })
-        trend_sym = '+' if delta_H_kJmol > 0 else ''
-        print(f"      → ΔH = {trend_sym}{delta_H_kJmol:.2f} kJ/mol (ref: shortest T2 in group)")
+        print(f"      → ΔH = {delta_H_kJmol:.2f} kJ/mol")
 
     results_df = pd.DataFrame(results)
     dsc_curves = np.array(dsc_curves)
@@ -316,6 +316,7 @@ def main():
     ax3.set_ylabel(f'ΔH ({T_INT_LOW}–{T_INT_HIGH}°C) (kJ/mol)')
     ax3.set_title('Released enthalpy vs T2 annealing time')
     ax3.set_xscale('log')
+    ax3.invert_yaxis()
     ax3.legend(fontsize=9)
     ax3.grid(True, alpha=0.3, which='both')
 
