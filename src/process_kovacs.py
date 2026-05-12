@@ -241,9 +241,9 @@ def main():
         # ── ΔH = excess enthalpy in Tg region ──
         tg_mask_grid = (T_grid >= T_TG_LO) & (T_grid <= T_TG_HI)
         ref_val_grid = np.interp(T_REF, T_grid, delta_DSC)
-        excess_DSC = delta_DSC[tg_mask_grid] - ref_val_grid
+        excess_DSC = ref_val_grid - delta_DSC[tg_mask_grid]
         excess_integral = trapezoid(excess_DSC, T_grid[tg_mask_grid])
-        delta_H = abs(CONV_FACTOR * excess_integral)
+        delta_H = CONV_FACTOR * excess_integral
 
         results.append({
             'ramp': ramp_idx + 1,
