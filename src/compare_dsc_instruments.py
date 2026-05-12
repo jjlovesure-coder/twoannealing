@@ -22,7 +22,7 @@ warnings.filterwarnings('ignore')
 # ─── Paths ──────────────────────────────────────────────────────────────────
 TXT_PATH = os.path.join(os.path.dirname(__file__), '..', 'data', '!2026004715.txt')
 XLSX_PATH = os.path.join(os.path.dirname(__file__), '..', 'data', 'PSrepeat2.xlsx')
-RESULTS_DIR = os.path.join(os.path.dirname(__file__), '..', 'results')
+RESULTS_DIR = os.path.join(os.path.dirname(__file__), '..', 'results', 'dsc')
 
 # ─── Sample info ────────────────────────────────────────────────────────────
 TXT_MASS_MG = 6.4610

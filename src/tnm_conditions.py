@@ -13,7 +13,7 @@ import pandas as pd
 from tnm_model import TNMModel
 
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-RESULTS_DIR = os.path.join(ROOT_DIR, 'results')
+RESULTS_DIR = os.path.join(ROOT_DIR, 'results', 'dsc')
 
 # Hold times in seconds (converted from minutes)
 HOLD_TIMES_MIN = np.array([
