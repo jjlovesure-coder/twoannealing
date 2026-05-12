@@ -24,6 +24,8 @@ DT_DT = 1.0 / BETA   # s/°C  (time per degree)
 #                          = DT_DT / (M_SAMPLE * 1000) * ∫ΔDSC dT
 #                          = 6 / 4700 * ∫ΔDSC dT   (µW·°C → J/g)
 CONV_FACTOR = DT_DT / (M_SAMPLE * 1000)  # (µW·°C → J/g)
+MW = 280000  # g/mol
+CONV_KJMOL = CONV_FACTOR * MW / 1000  # (µW·°C → kJ/mol)
 
 T_INT_LOW  = 35
 T_INT_HIGH = 95
@@ -236,7 +238,7 @@ def main():
         # Integrate over 30-100°C
         int_mask = (T_grid >= T_INT_LOW) & (T_grid <= T_INT_HIGH)
         integral = trapezoid(delta_DSC[int_mask], T_grid[int_mask])  # µW·°C
-        delta_H = CONV_FACTOR * integral  # J/g (signed, endothermic = negative)
+        delta_H_kJmol = CONV_KJMOL * integral  # kJ/mol (signed, endothermic = negative)
 
         # Average cp estimated from raw DSC: cp ≈ ΔDSC / (M_SAMPLE * 1000 * BETA)  → J/(g·K)
         # Actually compute directly: cp = CONV_FACTOR * (delta_DSC / DT_DT) per point, then average
