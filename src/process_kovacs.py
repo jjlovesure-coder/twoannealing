@@ -1,6 +1,7 @@
 """
-Two-step annealing DSC data processing for Polystyrene (PS).
+Kovacs-type DSC data processing for Polystyrene (PS).
 Three-step method: empty crucible baseline + sapphire reference → cp(T) → ΔH(30-100°C)
+Asymmetric approach: up-jump annealing (80→90°C).
 """
 import os
 import numpy as np
@@ -204,7 +205,7 @@ def detect_heating_ramps(T, t, min_rate=4.0, min_duration_pts=500):
 # ── Main processing ────────────────────────────────────────────────────────
 def main():
     print("=" * 70)
-    print("  Two-step annealing DSC analysis — Three-step cp method")
+    print("  Kovacs-type annealing DSC analysis — Three-step cp method")
     print("=" * 70)
 
     # ── 1. Load empty and reference data ─────────────────────────────────
@@ -250,9 +251,9 @@ def main():
     print(f"  Calibration grid: {T_grid[0]:.1f}–{T_grid[-1]:.1f} °C ({len(T_grid)} pts)")
     print(f"  Valid calibration points: {valid.sum()}/{len(T_grid)} ({valid_fraction:.0f}%)")
 
-    # ── 3. Load twosteps data ────────────────────────────────────────────
-    print("\n[3/5] Loading twosteps data and detecting heating ramps...")
-    ts_data, program = load_dsc_twosteps(os.path.join(DATA_DIR, 'twosteps.xlsx'))
+    # ── 3. Load Kovacs data ──────────────────────────────────────────────
+    print("\n[3/5] Loading Kovacs data and detecting heating ramps...")
+    ts_data, program = load_dsc_twosteps(os.path.join(DATA_DIR, 'pskovacs.xlsx'), sheet='PS-kovacs-01')
     T_ts = ts_data['Temp'].values
     t_ts = ts_data['Time'].values
     DSC_ts = ts_data['DSC'].values
@@ -263,9 +264,9 @@ def main():
     # ── 4. Build annealing-condition map ─────────────────────────────────
     # From the temperature program: each cycle is 4 steps.
     # Step pattern within each cycle:
-    #   step 4n+1: 200→90  (cool, hold t1 at 90°C)
-    #   step 4n+2: 90→80   (cool, hold t2 at 80°C — variable)
-    #   step 4n+3: 80→30   (cool)
+    #   step 4n+1: 200→80  (cool, hold t1 at 80°C)
+    #   step 4n+2: 80→90   (heat up, hold t2 at 90°C — variable) [Kovacs up-jump]
+    #   step 4n+3: 90→30   (cool)
     #   step 4n+4: 30→200  (heat — measurement ramp)
     heating_steps = [p for p in program if p['T_start'] == 30 and p['T_end'] == 200]
     print(f"  Heating steps in program: {len(heating_steps)}")
@@ -278,9 +279,9 @@ def main():
             h_step = heating_steps[idx]
             step_num = h_step['step']
             # Find the two preceding cooling/annealing steps
-            anneal_step_2 = None  # step before heating (80→30)
-            anneal_step_1 = None  # step before that  (90→80)
-            cool_step     = None  # step before that  (200→90)
+            anneal_step_2 = None  # step before heating (90→30)
+            anneal_step_1 = None  # step before that  (80→90 up-jump)
+            cool_step     = None  # step before that  (200→80)
             for p in program:
                 if p['step'] == step_num - 1:
                     anneal_step_2 = p
@@ -305,8 +306,8 @@ def main():
 
     print(f"  Mapped {len(conditions)} ramps to annealing conditions")
     for c in conditions:
-        print(f"    Ramp {c['ramp_idx']:2d}: T1(90°C)={c['T1_hold_min']:8.4f} min, "
-              f"T2(80°C)={c['T2_hold_min']:8.4f} min")
+        print(f"    Ramp {c['ramp_idx']:2d}: T1(80°C)={c['T1_hold_min']:8.4f} min, "
+              f"T2(90°C)={c['T2_hold_min']:8.4f} min")
 
     # ── 5. Compute cp & ΔH for each ramp ──────────────────────────────────
     print(f"\n[4/5] Computing cp(T) and ΔH ({T_INT_LOW}–{T_INT_HIGH}°C) for each ramp...")
@@ -420,9 +421,9 @@ def main():
                  marker=markers[i], color=colors_grp[i], linewidth=1.8,
                  markersize=9, markerfacecolor='white',
                  markeredgewidth=1.5, label=grp_label)
-    ax3.set_xlabel('T2 hold time at 80°C (min)')
+    ax3.set_xlabel('T2 hold time at 90°C (min)')
     ax3.set_ylabel(f'ΔH (30–100°C) (J/g)')
-    ax3.set_title('Enthalpy recovery vs T2 annealing time')
+    ax3.set_title('Enthalpy recovery vs T2 annealing time (Kovacs up-jump)')
     ax3.set_xscale('log')
     ax3.legend(fontsize=9)
     ax3.grid(True, alpha=0.3, which='both')
@@ -455,9 +456,9 @@ def main():
                  marker=markers[i], color=colors_grp[i], linewidth=1.8,
                  markersize=9, markerfacecolor='white',
                  markeredgewidth=1.5, label=grp_label)
-    ax5.set_xlabel('T2 hold time at 80°C (min)')
+    ax5.set_xlabel('T2 hold time at 90°C (min)')
     ax5.set_ylabel('Average cp (30–100°C) (J/(g·K))')
-    ax5.set_title('Average cp vs T2 annealing time')
+    ax5.set_title('Average cp vs T2 annealing time (Kovacs up-jump)')
     ax5.set_xscale('log')
     ax5.legend(fontsize=9)
     ax5.grid(True, alpha=0.3, which='both')
@@ -476,7 +477,7 @@ def main():
             f"{r['cp_avg_JgK']:.3f}",
         ])
     # Split into two columns (group A and B)
-    col_labels = ['Ramp', 't1@90°C\n(min)', 't2@80°C\n(min)', 'ΔH\n(J/g)', 'cp_avg\nJ/(g·K)']
+    col_labels = ['Ramp', 't1@80°C\n(min)', 't2@90°C\n(min)', 'ΔH\n(J/g)', 'cp_avg\nJ/(g·K)']
 
     # Add group headers
     table_nrows = len(table_data)
@@ -499,18 +500,18 @@ def main():
     ax6.set_title('Results Summary', fontsize=12, fontweight='bold', pad=5)
 
     plt.tight_layout(pad=2)
-    plt.savefig(os.path.join(RESULTS_DIR, 'twosteps_enthalpy_results.png'), dpi=150, bbox_inches='tight')
-    print(f"  Saved {os.path.join(RESULTS_DIR, 'twosteps_enthalpy_results.png')}")
+    plt.savefig(os.path.join(RESULTS_DIR, 'kovacs_enthalpy_results.png'), dpi=150, bbox_inches='tight')
+    print(f"  Saved {os.path.join(RESULTS_DIR, 'kovacs_enthalpy_results.png')}")
 
     # Save results to CSV
-    results_df.to_csv(os.path.join(RESULTS_DIR, 'twosteps_enthalpy_results.csv'), index=False, float_format='%.6f')
-    print(f"  Saved {os.path.join(RESULTS_DIR, 'twosteps_enthalpy_results.csv')}")
+    results_df.to_csv(os.path.join(RESULTS_DIR, 'kovacs_enthalpy_results.csv'), index=False, float_format='%.6f')
+    print(f"  Saved {os.path.join(RESULTS_DIR, 'kovacs_enthalpy_results.csv')}")
 
     # ── Print summary ─────────────────────────────────────────────────────
     print("\n" + "=" * 70)
-    print("  RESULTS SUMMARY — Two-step annealing of Polystyrene")
+    print("  RESULTS SUMMARY — Kovacs-type annealing of Polystyrene")
     print("=" * 70)
-    print(f"\n{'Ramp':<6} {'t1@90°C':>10}  {'t2@80°C':>10}  {'ΔH(30-100°C)':>14}  {'cp_avg':>10}")
+    print(f"\n{'Ramp':<6} {'t1@80°C':>10}  {'t2@90°C':>10}  {'ΔH(30-100°C)':>14}  {'cp_avg':>10}")
     print(f"{'':6} {'(min)':>10}  {'(min)':>10}  {'(J/g)':>14}  {'J/(g·K)':>10}")
     print("-" * 60)
     for _, r in results_df.iterrows():
@@ -522,12 +523,12 @@ def main():
     grp_a = results_df[results_df['T1_hold_min'] < 1.0]
     grp_b = results_df[results_df['T1_hold_min'] > 1.0]
 
-    print(f"\n  Group A (T1 = 0.833 min):")
+    print(f"\n  Group A (T1@80°C = 0.833 min, short):")
     print(f"    ΔH: {grp_a['delta_H_Jg'].min():.4f} – {grp_a['delta_H_Jg'].max():.4f} J/g")
     print(f"    ΔH mean ± std: {grp_a['delta_H_Jg'].mean():.4f} ± {grp_a['delta_H_Jg'].std():.4f} J/g")
     print(f"    cp_avg mean ± std: {grp_a['cp_avg_JgK'].mean():.4f} ± {grp_a['cp_avg_JgK'].std():.4f} J/(g·K)")
 
-    print(f"\n  Group B (T1 = 8.333 min):")
+    print(f"\n  Group B (T1@80°C = 8.333 min, long):")
     print(f"    ΔH: {grp_b['delta_H_Jg'].min():.4f} – {grp_b['delta_H_Jg'].max():.4f} J/g")
     print(f"    ΔH mean ± std: {grp_b['delta_H_Jg'].mean():.4f} ± {grp_b['delta_H_Jg'].std():.4f} J/g")
     print(f"    cp_avg mean ± std: {grp_b['cp_avg_JgK'].mean():.4f} ± {grp_b['cp_avg_JgK'].std():.4f} J/(g·K)")
