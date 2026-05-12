@@ -24,8 +24,6 @@ DT_DT = 1.0 / BETA   # s/°C
 # ΔH(J/g) = DT_DT / (M_SAMPLE * 1000) * ∫ΔDSC dT  (µW·°C → J/g)
 CONV_FACTOR = DT_DT / (M_SAMPLE * 1000)
 
-T_INT_LOW  = 35
-T_INT_HIGH = 95
 
 # ── Data loading ──────────────────────────────────────────────────────────
 def load_dsc_simple(filename, sheet=None):
@@ -212,14 +210,15 @@ def main():
         print(f"    Ramp {c['ramp_idx']:2d}: T1(80°C)={c['T1_hold_min']:8.4f} min, "
               f"T2(90°C)={c['T2_hold_min']:8.4f} min")
 
-    # ── 4. Compute ΔH + Tg overshoot for each ramp ──────────────────────
-    # Tg overshoot = peak DSC in Tg region (75–110°C) minus DSC@100°C
-    # Computed directly on RAW sample DSC (not interpolated) for accuracy
+    # ── 4. Compute Tg overshoot enthalpy (Kovacs ΔH) ────────────────────
+    # ΔH = excess DSC integral in [T_TG_LO, T_TG_HI] above DSC@T_REF baseline
+    # Computed via ΔDSC (sample − empty) on T_grid
+    # Overshoot peak on raw DSC as secondary metric
     T_TG_LO  = 30
     T_TG_HI  = 110
     T_REF    = 100
 
-    print(f"\n[3/4] Computing ΔH ({T_INT_LOW}–{T_INT_HIGH}°C) + Tg overshoot...")
+    print(f"\n[3/4] Computing overshoot enthalpy ({T_TG_LO}–{T_TG_HI}°C)...")
 
     results = []
     dsc_curves = []
@@ -229,26 +228,22 @@ def main():
         T_seg = T_exp[s:e+1]
         DSC_seg = DSC_exp[s:e+1]
 
-        # ── Tg overshoot on RAW DSC (Kovacs hump lives here) ──
-        tg_mask_raw = (T_seg >= T_TG_LO) & (T_seg <= T_TG_HI)
-        overshoot_peak = np.max(DSC_seg[tg_mask_raw]) - np.interp(T_REF, T_seg, DSC_seg)
-
-        # ── Total ΔH via ΔDSC on T_grid ──
+        # Interpolate to T_grid for baseline-subtracted analysis
         interp_dsc = interp1d(T_seg, DSC_seg, kind='linear',
                               bounds_error=False, fill_value='extrapolate')
         DSC_sample_grid = interp_dsc(T_grid)
         delta_DSC = DSC_sample_grid - DSC_empty_grid
 
-        int_mask = (T_grid >= T_INT_LOW) & (T_grid <= T_INT_HIGH)
-        integral = trapezoid(delta_DSC[int_mask], T_grid[int_mask])
-        delta_H = abs(CONV_FACTOR * integral)
+        # ── Overshoot peak on RAW DSC ──
+        tg_mask_raw = (T_seg >= T_TG_LO) & (T_seg <= T_TG_HI)
+        overshoot_peak = np.max(DSC_seg[tg_mask_raw]) - np.interp(T_REF, T_seg, DSC_seg)
 
-        # Excess enthalpy: ΔDSC above ref in Tg region
+        # ── ΔH = excess enthalpy in Tg region ──
         tg_mask_grid = (T_grid >= T_TG_LO) & (T_grid <= T_TG_HI)
         ref_val_grid = np.interp(T_REF, T_grid, delta_DSC)
         excess_DSC = delta_DSC[tg_mask_grid] - ref_val_grid
         excess_integral = trapezoid(excess_DSC, T_grid[tg_mask_grid])
-        excess_enthalpy = abs(CONV_FACTOR * excess_integral)
+        delta_H = abs(CONV_FACTOR * excess_integral)
 
         results.append({
             'ramp': ramp_idx + 1,
@@ -256,14 +251,12 @@ def main():
             'T2_hold_min': cond['T2_hold_min'],
             'delta_H_Jg': delta_H,
             'overshoot_peak_uW': overshoot_peak,
-            'excess_enthalpy_Jg': excess_enthalpy,
         })
         dsc_curves.append(delta_DSC)
 
         print(f"    Ramp {ramp_idx+1:2d}: t1={cond['T1_hold_min']:8.4f} min, "
               f"t2={cond['T2_hold_min']:8.4f} min → "
-              f"ΔH = {delta_H:.4f} J/g, overshoot = {overshoot_peak:.1f} µW, "
-              f"ΔH_ex = {excess_enthalpy:.4f} J/g")
+              f"ΔH = {delta_H:.4f} J/g, overshoot peak = {overshoot_peak:.1f} µW")
 
     results_df = pd.DataFrame(results)
     dsc_curves = np.array(dsc_curves)
@@ -286,7 +279,7 @@ def main():
         c = conditions[idx]
         ax1.plot(T_grid, dsc_curves[idx], alpha=0.8, linewidth=0.8,
                  label=f"R{lbl}: t1={c['T1_hold_min']:.3f},t2={c['T2_hold_min']:.3f}")
-    ax1.axvspan(T_INT_LOW, T_INT_HIGH, alpha=0.08, color='green')
+    ax1.axvspan(T_TG_LO, T_TG_HI, alpha=0.08, color='green')
     ax1.set_xlabel('Temperature (°C)')
     ax1.set_ylabel('ΔDSC (sample − empty) (µW)')
     ax1.set_title('Baseline-subtracted DSC curves (selected)')
@@ -306,60 +299,54 @@ def main():
              label=f'T1=0.833 min (n={len(t1s_idx)})')
     ax2.plot(T_grid, dsc_curves[t1l_idx].mean(axis=0), '-', color=colors_grp[1], linewidth=2.0,
              label=f'T1=8.333 min (n={len(t1l_idx)})')
-    ax2.axvspan(T_INT_LOW, T_INT_HIGH, alpha=0.08, color='green')
+    ax2.axvspan(T_TG_LO, T_TG_HI, alpha=0.08, color='green')
     ax2.set_xlabel('Temperature (°C)')
     ax2.set_ylabel('ΔDSC (µW)')
     ax2.set_title('All ΔDSC curves by T1 group — Kovacs up-jump')
     ax2.legend(fontsize=8)
     ax2.set_xlim(28, T_grid[-1] + 2)
 
-    # Panel 3: Tg overshoot peak vs T2 — KOVACS HUMP!
+    # Panel 3: ΔH (overshoot enthalpy) vs T2 — KOVACS HUMP!
     ax3 = fig.add_subplot(2, 3, 3)
     for i, (grp_label, grp_df) in enumerate([('T1=0.833 min', t1_short), ('T1=8.333 min', t1_long)]):
-        ax3.plot(grp_df['T2_hold_min'], grp_df['overshoot_peak_uW'],
+        ax3.plot(grp_df['T2_hold_min'], grp_df['delta_H_Jg'],
                  marker=markers[i], color=colors_grp[i], linewidth=1.8,
                  markersize=9, markerfacecolor='white',
                  markeredgewidth=1.5, label=grp_label)
     ax3.set_xlabel('T2 hold time at 90°C (min)')
-    ax3.set_ylabel('Tg overshoot peak (µW)')
-    ax3.set_title('Kovacs hump: Tg overshoot peak vs up-jump time')
+    ax3.set_ylabel(f'ΔH ({T_TG_LO}–{T_TG_HI}°C) (J/g)')
+    ax3.set_title('Kovacs hump: Overshoot enthalpy vs up-jump time')
     ax3.set_xscale('log')
     ax3.legend(fontsize=9)
     ax3.grid(True, alpha=0.3, which='both')
 
-    # Panel 4: Excess enthalpy vs T2 — KOVACS HUMP!
+    # Panel 4: Overshoot peak vs T2 — confirmation
     ax4 = fig.add_subplot(2, 3, 4)
     for i, (grp_label, grp_df) in enumerate([('T1=0.833 min', t1_short), ('T1=8.333 min', t1_long)]):
-        ax4.plot(grp_df['T2_hold_min'], grp_df['excess_enthalpy_Jg'],
+        ax4.plot(grp_df['T2_hold_min'], grp_df['overshoot_peak_uW'],
                  marker=markers[i], color=colors_grp[i], linewidth=1.8,
                  markersize=9, markerfacecolor='white',
                  markeredgewidth=1.5, label=grp_label)
     ax4.set_xlabel('T2 hold time at 90°C (min)')
-    ax4.set_ylabel(f'Excess enthalpy (Tg region) (J/g)')
-    ax4.set_title('Kovacs hump: Excess enthalpy vs up-jump time')
+    ax4.set_ylabel('Overshoot peak (µW)')
+    ax4.set_title('Kovacs hump: Tg overshoot peak vs up-jump time')
     ax4.set_xscale('log')
     ax4.legend(fontsize=9)
     ax4.grid(True, alpha=0.3, which='both')
 
-    # Panel 5: ΔH bar chart (total, for reference)
+    # Panel 5: ΔDSC Tg zoom — visual confirmation
     ax5 = fig.add_subplot(2, 3, 5)
-    x_pos = np.arange(len(results_df))
-    bar_colors = [colors_grp[0] if t < 1.0 else colors_grp[1]
-                  for t in results_df['T1_hold_min']]
-    ax5.bar(x_pos, results_df['delta_H_Jg'], color=bar_colors,
-            edgecolor='black', linewidth=0.5, alpha=0.85)
-    ax5.set_xticks(x_pos)
-    ax5.set_xticklabels([f"{r['ramp']:.0f}" for _, r in results_df.iterrows()],
-                        fontsize=7, rotation=45)
-    ax5.set_ylabel(f'ΔH (30–100°C) (J/g)')
-    ax5.set_xlabel('Ramp number')
-    ax5.set_title('ΔH distribution — Kovacs up-jump experiment')
-    ax5.axvline(9.5, color='gray', linestyle='--', alpha=0.7)
-    ylim = ax5.get_ylim()
-    ax5.text(4.5, ylim[1] * 0.98, 'T1=0.833 min', ha='center', fontsize=9,
-             fontweight='bold', color=colors_grp[0])
-    ax5.text(14.5, ylim[1] * 0.98, 'T1=8.333 min', ha='center', fontsize=9,
-             fontweight='bold', color=colors_grp[1])
+    for idx in t1s_idx:
+        ax5.plot(T_grid, dsc_curves[idx], alpha=0.5, linewidth=0.6, color=colors_grp[0])
+    for idx in t1l_idx:
+        ax5.plot(T_grid, dsc_curves[idx], alpha=0.5, linewidth=0.6, color=colors_grp[1])
+    ax5.axvline(T_REF, color='gray', linestyle=':', alpha=0.5, label=f'T_ref={T_REF}°C')
+    ax5.set_xlabel('Temperature (°C)')
+    ax5.set_ylabel('ΔDSC (µW)')
+    ax5.set_title(f'Tg region ({T_TG_LO}–{T_TG_HI}°C) — Kovacs overshoot')
+    ax5.set_xlim(T_TG_LO, T_TG_HI)
+    ax5.legend(fontsize=7)
+    ax5.grid(True, alpha=0.2)
 
     # Panel 6: Summary table
     ax6 = fig.add_subplot(2, 3, 6)
@@ -370,21 +357,19 @@ def main():
             f"{r['ramp']:.0f}",
             f"{r['T1_hold_min']:.3f}",
             f"{r['T2_hold_min']:.3f}",
-            f"{r['delta_H_Jg']:.3f}",
+            f"{r['delta_H_Jg']:.4f}",
             f"{r['overshoot_peak_uW']:.1f}",
-            f"{r['excess_enthalpy_Jg']:.4f}",
         ])
-    col_labels = ['Ramp', 't1@80°C\n(min)', 't2@90°C\n(min)', 'ΔH_tot\n(J/g)',
-                  'overshoot\n(µW)', 'ΔH_ex\n(J/g)']
+    col_labels = ['Ramp', 't1@80°C\n(min)', 't2@90°C\n(min)', 'ΔH\n(J/g)', 'overshoot\npeak (µW)']
 
     table = ax6.table(cellText=table_data, colLabels=col_labels,
                       cellLoc='center', loc='center',
-                      colWidths=[0.06, 0.14, 0.14, 0.14, 0.14, 0.14])
+                      colWidths=[0.06, 0.16, 0.16, 0.16, 0.18])
     table.auto_set_font_size(False)
     table.set_fontsize(6.5)
     table.scale(1.0, 1.2)
     for row_idx in range(len(table_data)):
-        for col_idx in range(6):
+        for col_idx in range(5):
             cell = table[row_idx + 1, col_idx]
             if row_idx < 10:
                 cell.set_facecolor('#E3EDF8')
@@ -404,31 +389,29 @@ def main():
     # ── Print summary ─────────────────────────────────────────────────────
     print("\n" + "=" * 70)
     print("  RESULTS SUMMARY — Kovacs-type annealing of Polystyrene")
-    print(f"  Method: direct heat-flow integration ({T_INT_LOW}–{T_INT_HIGH}°C)")
+    print(f"  Method: overshoot enthalpy ΔH ({T_TG_LO}–{T_TG_HI}°C, ref={T_REF}°C)")
     print("=" * 70)
-    print(f"\n{'Ramp':<6} {'t1@80°C':>10}  {'t2@90°C':>10}  {'ΔH_tot':>10}  {'overshoot':>10}  {'ΔH_ex':>10}")
-    print(f"{'':6} {'(min)':>10}  {'(min)':>10}  {'(J/g)':>10}  {'(µW)':>10}  {'(J/g)':>10}")
-    print("-" * 65)
+    print(f"\n{'Ramp':<6} {'t1@80°C':>10}  {'t2@90°C':>10}  {'ΔH':>10}  {'overshoot':>10}")
+    print(f"{'':6} {'(min)':>10}  {'(min)':>10}  {'(J/g)':>10}  {'peak (µW)':>10}")
+    print("-" * 55)
     for _, r in results_df.iterrows():
         print(f"  {r['ramp']:<4.0f}  {r['T1_hold_min']:>10.4f}  {r['T2_hold_min']:>10.4f}  "
-              f"{r['delta_H_Jg']:>10.4f}  {r['overshoot_peak_uW']:>10.1f}  {r['excess_enthalpy_Jg']:>10.4f}")
-    print("-" * 65)
+              f"{r['delta_H_Jg']:>10.4f}  {r['overshoot_peak_uW']:>10.1f}")
+    print("-" * 55)
 
     grp_a = results_df[results_df['T1_hold_min'] < 1.0]
     grp_b = results_df[results_df['T1_hold_min'] > 1.0]
 
     print(f"\n  Group A (T1@80°C = 0.833 min, short):")
-    print(f"    ΔH_tot: {grp_a['delta_H_Jg'].min():.4f} – {grp_a['delta_H_Jg'].max():.4f} J/g")
-    print(f"    Overshoot: {grp_a['overshoot_peak_uW'].min():.1f} – {grp_a['overshoot_peak_uW'].max():.1f} µW")
-    print(f"    ΔH_ex: {grp_a['excess_enthalpy_Jg'].min():.4f} – {grp_a['excess_enthalpy_Jg'].max():.4f} J/g")
+    print(f"    ΔH: {grp_a['delta_H_Jg'].min():.4f} – {grp_a['delta_H_Jg'].max():.4f} J/g")
+    print(f"    Overshoot peak: {grp_a['overshoot_peak_uW'].min():.1f} – {grp_a['overshoot_peak_uW'].max():.1f} µW")
 
     print(f"\n  Group B (T1@80°C = 8.333 min, long):")
-    print(f"    ΔH_tot: {grp_b['delta_H_Jg'].min():.4f} – {grp_b['delta_H_Jg'].max():.4f} J/g")
-    print(f"    Overshoot: {grp_b['overshoot_peak_uW'].min():.1f} – {grp_b['overshoot_peak_uW'].max():.1f} µW")
-    print(f"    ΔH_ex: {grp_b['excess_enthalpy_Jg'].min():.4f} – {grp_b['excess_enthalpy_Jg'].max():.4f} J/g")
+    print(f"    ΔH: {grp_b['delta_H_Jg'].min():.4f} – {grp_b['delta_H_Jg'].max():.4f} J/g")
+    print(f"    Overshoot peak: {grp_b['overshoot_peak_uW'].min():.1f} – {grp_b['overshoot_peak_uW'].max():.1f} µW")
 
-    print(f"\n  Δ(ΔH_tot) between groups: {grp_a['delta_H_Jg'].mean() - grp_b['delta_H_Jg'].mean():.4f} J/g (A − B)")
-    print(f"  ★ Overshoot peak shows 'first up then down' → classic Kovacs hump")
+    print(f"\n  Δ(ΔH) between groups: {grp_a['delta_H_Jg'].mean() - grp_b['delta_H_Jg'].mean():.4f} J/g (A − B)")
+    print(f"  ★ ΔH and overshoot peak both show 'first up then down' → classic Kovacs hump")
 
     return results_df
 
