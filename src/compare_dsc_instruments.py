@@ -605,25 +605,28 @@ def main():
 
     print(f"""
   ── Key Findings ──
-    1. Systematic offset: A large baseline offset ({s['mean_diff']:+.2f} W/g)
-       exists between the two instruments. The Mettler STARe data
-       appears pre-processed (auto baseline correction), while the
-       XLSX data is raw instrument output.
+    1. 两台设备均为原始测量数据（未经基线校正），
+       差异反映的是仪器硬件本身的不同特性。
 
-    2. After linear baseline subtraction, the residual RMS
-       difference drops to {b['rms_diff']:.4f} W/g, indicating that
-       the two instruments capture the same thermal events.
+    2. 系统性偏差: 两台仪器之间存在约 {s['mean_diff']:+.2f} W/g
+       的基线偏移，Other DSC 的信号整体比 Mettler
+       更偏负（吸热方向）。
 
-    3. Sensitivity: The Other DSC shows {abs(sens_ratio[0]):.1f}× higher
-       signal amplitude than the Mettler processed output
-       (R² = {sens_r2:.3f}).
+    3. 扣除线性基线后，残余 RMS 从 {s['rms_diff']:.2f}
+       降至 {b['rms_diff']:.4f} W/g，说明两条曲线在热事件
+       特征上具有良好的一致性。
 
-    4. Glass transition: Both instruments detect the PS Tg
-       inflection at ~{np.mean(txt_infl):.0f}°C (Mettler) vs"
-                f" ~{np.mean(xlsx_infl):.0f}°C (Other DSC).
+    4. 灵敏度: Other DSC 的信号幅度约为 Mettler 的
+       {abs(sens_ratio[0]):.1f} 倍（R² = {sens_r2:.3f}），
+       两台仪器的信号存在线性比例关系。
 
-    5. Reproducibility: Both instruments show excellent
-       within-instrument reproducibility across heating cycles.
+    5. 玻璃化转变: Mettler 测得 Tg 拐点约 {np.mean(txt_infl):.0f}°C，
+       Other DSC 约 {np.mean(xlsx_infl):.0f}°C。
+       温差（~{abs(np.mean(xlsx_infl)-np.mean(txt_infl)):.0f}°C）可能与热滞后
+       及温度校准差异有关（升温速率 60°C/min）。
+
+    6. 重复性: 两台仪器各自的两次升温曲线高度吻合，
+       说明仪器的测量重复性良好。
 """)
     print("=" * 68)
 
