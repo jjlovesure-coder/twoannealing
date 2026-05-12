@@ -25,8 +25,8 @@ DT_DT = 1.0 / BETA   # s/°C  (time per degree)
 #                          = 6 / 4700 * ∫ΔDSC dT   (µW·°C → J/g)
 CONV_FACTOR = DT_DT / (M_SAMPLE * 1000)  # (µW·°C → J/g)
 
-T_INT_LOW  = 30
-T_INT_HIGH = 100
+T_INT_LOW  = 35
+T_INT_HIGH = 95
 
 # ── Data loading ──────────────────────────────────────────────────────────
 def load_dsc_simple(filename, sheet=None):
