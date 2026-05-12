@@ -1,6 +1,6 @@
 """
 Kovacs-type DSC data processing for Polystyrene (PS).
-Three-step method: empty crucible baseline + sapphire reference → cp(T) → ΔH(30-100°C)
+Direct heat-flow integration: ΔH = (1/(β·m)) × ∫(DSC_sample − DSC_empty) dT
 Asymmetric approach: up-jump annealing (80→90°C).
 """
 import os
@@ -11,59 +11,23 @@ from scipy.integrate import trapezoid
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-import matplotlib.ticker as ticker
 
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_DIR = os.path.join(ROOT_DIR, 'data')
 RESULTS_DIR = os.path.join(ROOT_DIR, 'results')
 
 # ── Constants ──────────────────────────────────────────────────────────────
-M_SAMPLE = 4.7   # mg (PS)
-M_REF    = 10.0  # mg (sapphire)
-T_INT_LOW  = 30   # °C
-T_INT_HIGH = 100  # °C
+M_SAMPLE = 4.7      # mg
+HEATING_RATE = 10.0  # °C/min
+BETA = HEATING_RATE / 60.0  # °C/s
+DT_DT = 1.0 / BETA   # s/°C
+# ΔH(J/g) = DT_DT / (M_SAMPLE * 1000) * ∫ΔDSC dT  (µW·°C → J/g)
+CONV_FACTOR = DT_DT / (M_SAMPLE * 1000)
 
-# ── Sapphire (Al2O3) specific heat capacity [J/(g·K)] ─────────────────────
-# Standard NETZSCH / PerkinElmer reference data for synthetic sapphire
-# Polynomial fit: cp = A + B·T + C·T^2 + D·T^3 (T in °C, valid 20–300°C)
-# Based on published SRM 720 certificate values converted to J/(g·K)
-_SAPPHIRE_CP_TABLE = np.array([
-    # T(°C), cp(J/(g·K))
-    [20,    0.7356],
-    [30,    0.7603],
-    [40,    0.7838],
-    [50,    0.8056],
-    [60,    0.8257],
-    [70,    0.8440],
-    [80,    0.8606],
-    [90,    0.8756],
-    [100,   0.8890],
-    [110,   0.9009],
-    [120,   0.9114],
-    [130,   0.9205],
-    [140,   0.9283],
-    [150,   0.9349],
-    [160,   0.9404],
-    [170,   0.9448],
-    [180,   0.9483],
-    [190,   0.9509],
-    [200,   0.9527],
-    [220,   0.9540],
-    [250,   0.9550],
-    [300,   0.9580],
-])
+T_INT_LOW  = 30
+T_INT_HIGH = 100
 
-
-def cp_sapphire_JgK(T_C):
-    """Return sapphire specific heat in J/(g·K) at temperature T in °C.
-    Uses linear interpolation of standard NETZSCH reference data.
-    """
-    T_C = np.asarray(T_C)
-    cp = np.interp(T_C, _SAPPHIRE_CP_TABLE[:, 0], _SAPPHIRE_CP_TABLE[:, 1],
-                   left=_SAPPHIRE_CP_TABLE[0, 1], right=_SAPPHIRE_CP_TABLE[-1, 1])
-    return cp  # J/(g·K)
-
-# ── Data loading helpers ───────────────────────────────────────────────────
+# ── Data loading ──────────────────────────────────────────────────────────
 def load_dsc_simple(filename, sheet=None):
     """Load a simple DSC run (empty or ref) — single 30→200 ramp."""
     if sheet is None:
@@ -71,8 +35,6 @@ def load_dsc_simple(filename, sheet=None):
     else:
         df = pd.read_excel(filename, sheet_name=sheet)
 
-    # Search for the data header row containing "Time" (twosteps format)
-    # or find the first row with finite numeric data in col0 and col1
     header_row = None
     for i in range(len(df)):
         v0 = df.iloc[i, 0]
@@ -81,7 +43,6 @@ def load_dsc_simple(filename, sheet=None):
             break
 
     if header_row is None:
-        # Find first row with finite numeric col0 AND col1 (not NaN)
         for i in range(len(df)):
             try:
                 a = float(str(df.iloc[i, 0]).strip())
@@ -92,13 +53,8 @@ def load_dsc_simple(filename, sheet=None):
             except (ValueError, TypeError):
                 continue
 
-    if header_row is None:
-        raise ValueError(f"Could not find data start in {filename}")
-
-    # Read from header row: if it's a text header (e.g. "Time"), skip it
     v0 = df.iloc[header_row, 0]
     if v0 is not None and isinstance(v0, str) and 'Time' in str(v0):
-        # data starts after this row; also skip unit row if present
         data_start = header_row + 1
         v0_next = df.iloc[data_start, 0]
         if v0_next is not None and isinstance(v0_next, str) and 'min' in str(v0_next).lower():
@@ -108,21 +64,17 @@ def load_dsc_simple(filename, sheet=None):
         data = df.iloc[header_row:].copy()
 
     data = data.dropna(axis=1, how='all').reset_index(drop=True)
-
-    # Rename columns
     ncols = data.shape[1]
     col_names = ['Time', 'Temp', 'DSC', 'DDSC'] + [f'Extra_{i}' for i in range(max(0, ncols-4))]
     data.columns = col_names[:ncols] if ncols <= len(col_names) else col_names + [f'Extra_{i}' for i in range(len(col_names), ncols)]
-
     data = data[['Time', 'Temp', 'DSC', 'DDSC']].astype(float).reset_index(drop=True)
     return data
 
 
-def load_dsc_twosteps(filename, sheet='PS-02'):
-    """Load the twosteps experiment data with temperature program."""
+def load_dsc_experiment(filename, sheet):
+    """Load experiment data with temperature program."""
     df = pd.read_excel(filename, sheet_name=sheet)
 
-    # Parse temperature program (rows starting ~7 to before "温度程序模式")
     program = []
     for i in range(7, len(df)):
         v1 = df.iloc[i, 1]
@@ -145,7 +97,6 @@ def load_dsc_twosteps(filename, sheet='PS-02'):
         except (ValueError, TypeError, IndexError):
             continue
 
-    # Find data header row with "Time"
     header_row = None
     for i in range(90, len(df)):
         v0 = df.iloc[i, 0]
@@ -153,22 +104,14 @@ def load_dsc_twosteps(filename, sheet='PS-02'):
             header_row = i
             break
 
-    if header_row is None:
-        raise ValueError("Could not find 'Time' header in twosteps data")
-
-    # Data starts after header row + unit row ("min", "Cel", etc.)
-    # Actually, just grab raw data from header_row+2 onward (skip header + unit)
     data_start = header_row + 2
     raw = df.iloc[data_start:].copy()
-
-    # Select first 4 columns: Time, Temp, DSC, DDSC
     data = pd.DataFrame({
         'Time': pd.to_numeric(raw.iloc[:, 0], errors='coerce'),
         'Temp': pd.to_numeric(raw.iloc[:, 1], errors='coerce'),
         'DSC':  pd.to_numeric(raw.iloc[:, 2], errors='coerce'),
         'DDSC': pd.to_numeric(raw.iloc[:, 3], errors='coerce'),
     }).dropna().reset_index(drop=True)
-
     data = data.astype(float)
     return data, program
 
@@ -176,7 +119,7 @@ def load_dsc_twosteps(filename, sheet='PS-02'):
 def detect_heating_ramps(T, t, min_rate=4.0, min_duration_pts=500):
     """Detect heating ramps (30→200 at ~10°C/min) using temperature gradient."""
     n = len(T)
-    window = 30  # ~30 sec smoothing
+    window = 30
     dTdt = np.zeros(n)
     for i in range(window, n - window):
         dTdt[i] = (T[i + window] - T[i - window]) / max(t[i + window] - t[i - window], 1e-12)
@@ -205,91 +148,52 @@ def detect_heating_ramps(T, t, min_rate=4.0, min_duration_pts=500):
 # ── Main processing ────────────────────────────────────────────────────────
 def main():
     print("=" * 70)
-    print("  Kovacs-type annealing DSC analysis — Three-step cp method")
+    print("  Kovacs-type annealing DSC analysis — Direct heat-flow integration")
     print("=" * 70)
 
-    # ── 1. Load empty and reference data ─────────────────────────────────
-    print("\n[1/5] Loading empty and reference data...")
+    # ── 1. Load empty baseline ──────────────────────────────────────────
+    print("\n[1/4] Loading empty crucible baseline...")
     empty = load_dsc_simple(os.path.join(DATA_DIR, 'ps-empty-01.xlsx'))
-    ref   = load_dsc_simple(os.path.join(DATA_DIR, 'ps-ref-01.xlsx'))
-
     print(f"  Empty: {len(empty)} pts, T range {empty['Temp'].min():.1f}–{empty['Temp'].max():.1f} °C")
-    print(f"  Ref:   {len(ref)} pts, T range {ref['Temp'].min():.1f}–{ref['Temp'].max():.1f} °C")
 
-    # Find overlapping temperature range across all three datasets
-    T_min = max(empty['Temp'].min(), ref['Temp'].min(), 30.0)
-    T_max = min(empty['Temp'].max(), ref['Temp'].max(), 200.0)
-
-    # Trim to overlapping range for calibration
-    mask_e = (empty['Temp'] >= T_min - 0.5) & (empty['Temp'] <= T_max + 0.5)
-    mask_r = (ref['Temp'] >= T_min - 0.5) & (ref['Temp'] <= T_max + 0.5)
-    empty_cal = empty[mask_e].copy()
-    ref_cal   = ref[mask_r].copy()
-
-    print(f"  Calibration T range: {T_min:.1f}–{T_max:.1f} °C (overlap of empty+ref)")
-
-    # Interpolate to common temperature grid (0.1°C steps) within valid range
-    T_grid = np.arange(np.ceil(T_min), np.floor(T_max) + 0.01, 0.1)
-    interp_empty = interp1d(empty_cal['Temp'], empty_cal['DSC'], kind='linear',
+    T_empty_min = max(empty['Temp'].min(), 30.0)
+    T_empty_max = min(empty['Temp'].max(), 200.0)
+    T_grid = np.arange(np.ceil(T_empty_min), np.floor(T_empty_max) + 0.01, 0.1)
+    interp_empty = interp1d(empty['Temp'], empty['DSC'], kind='linear',
                             bounds_error=False, fill_value='extrapolate')
-    interp_ref   = interp1d(ref_cal['Temp'], ref_cal['DSC'], kind='linear',
-                            bounds_error=False, fill_value='extrapolate')
-
     DSC_empty_grid = interp_empty(T_grid)
-    DSC_ref_grid   = interp_ref(T_grid)
+    print(f"  Baseline grid: {T_grid[0]:.0f}–{T_grid[-1]:.0f} °C ({len(T_grid)} pts)")
 
-    # ── 2. Three-step calibration ────────────────────────────────────────
-    print("\n[2/5] Computing three-step calibration...")
-    cp_ref_grid = cp_sapphire_JgK(T_grid)  # J/(g·K)
+    # ── 2. Load Kovacs data ─────────────────────────────────────────────
+    print("\n[2/4] Loading Kovacs data and detecting heating ramps...")
+    exp_data, program = load_dsc_experiment(os.path.join(DATA_DIR, 'pskovacs.xlsx'),
+                                            sheet='PS-kovacs-01')
+    T_exp = exp_data['Temp'].values
+    t_exp = exp_data['Time'].values
+    DSC_exp = exp_data['DSC'].values
 
-    # cp_sample(T) = cp_ref(T) × [DSC_sample - DSC_empty] / [DSC_ref - DSC_empty] × (m_ref / m_sample)
-    dsc_empty_to_ref = DSC_ref_grid - DSC_empty_grid  # µW
-    # Avoid division by zero (shouldn't happen in overlapping T range)
-    valid = np.abs(dsc_empty_to_ref) > 1e-6
-    valid_fraction = valid.sum() / len(T_grid) * 100
-
-    print(f"  Calibration grid: {T_grid[0]:.1f}–{T_grid[-1]:.1f} °C ({len(T_grid)} pts)")
-    print(f"  Valid calibration points: {valid.sum()}/{len(T_grid)} ({valid_fraction:.0f}%)")
-
-    # ── 3. Load Kovacs data ──────────────────────────────────────────────
-    print("\n[3/5] Loading Kovacs data and detecting heating ramps...")
-    ts_data, program = load_dsc_twosteps(os.path.join(DATA_DIR, 'pskovacs.xlsx'), sheet='PS-kovacs-01')
-    T_ts = ts_data['Temp'].values
-    t_ts = ts_data['Time'].values
-    DSC_ts = ts_data['DSC'].values
-
-    ramps = detect_heating_ramps(T_ts, t_ts)
+    ramps = detect_heating_ramps(T_exp, t_exp)
     print(f"  Found {len(ramps)} heating ramps")
 
-    # ── 4. Build annealing-condition map ─────────────────────────────────
-    # From the temperature program: each cycle is 4 steps.
-    # Step pattern within each cycle:
-    #   step 4n+1: 200→80  (cool, hold t1 at 80°C)
-    #   step 4n+2: 80→90   (heat up, hold t2 at 90°C — variable) [Kovacs up-jump]
-    #   step 4n+3: 90→30   (cool)
-    #   step 4n+4: 30→200  (heat — measurement ramp)
+    # ── 3. Map annealing conditions ─────────────────────────────────────
+    # Step pattern: 4n+1=200→80(hold t1), 4n+2=80→90(hold t2, UP-JUMP), 4n+3=90→30, 4n+4=30→200(heating)
     heating_steps = [p for p in program if p['T_start'] == 30 and p['T_end'] == 200]
     print(f"  Heating steps in program: {len(heating_steps)}")
 
-    # Map each heating ramp to its preceding annealing steps
     conditions = []
     for idx, (s, e) in enumerate(ramps):
-        # Find the corresponding heating program step
         if idx < len(heating_steps):
             h_step = heating_steps[idx]
             step_num = h_step['step']
-            # Find the two preceding cooling/annealing steps
-            anneal_step_2 = None  # step before heating (90→30)
-            anneal_step_1 = None  # step before that  (80→90 up-jump)
-            cool_step     = None  # step before that  (200→80)
+            cool_step = None
+            anneal_step_1 = None
             for p in program:
                 if p['step'] == step_num - 1:
-                    anneal_step_2 = p
+                    pass  # 90→30 cooling
                 elif p['step'] == step_num - 2:
-                    anneal_step_1 = p
+                    anneal_step_1 = p  # 80→90 up-jump
                 elif p['step'] == step_num - 3:
-                    cool_step = p
-
+                    cool_step = p  # 200→80
             t1_hold = cool_step['time_min'] if cool_step else None
             t2_hold = anneal_step_1['time_min'] if anneal_step_1 else None
         else:
@@ -304,118 +208,96 @@ def main():
             'end_idx': e,
         })
 
-    print(f"  Mapped {len(conditions)} ramps to annealing conditions")
     for c in conditions:
         print(f"    Ramp {c['ramp_idx']:2d}: T1(80°C)={c['T1_hold_min']:8.4f} min, "
               f"T2(90°C)={c['T2_hold_min']:8.4f} min")
 
-    # ── 5. Compute cp & ΔH for each ramp ──────────────────────────────────
-    print(f"\n[4/5] Computing cp(T) and ΔH ({T_INT_LOW}–{T_INT_HIGH}°C) for each ramp...")
+    # ── 4. Compute ΔH for each ramp ─────────────────────────────────────
+    print(f"\n[3/4] Computing ΔH ({T_INT_LOW}–{T_INT_HIGH}°C) by direct heat-flow integration...")
 
     results = []
-    cp_curves = []  # Store all cp curves for later analysis
+    dsc_curves = []
 
     for ramp_idx, cond in enumerate(conditions):
         s, e = cond['start_idx'], cond['end_idx']
-        T_seg = T_ts[s:e+1]
-        DSC_seg = DSC_ts[s:e+1]
+        T_seg = T_exp[s:e+1]
+        DSC_seg = DSC_exp[s:e+1]
 
-        # Interpolate sample DSC to common T_grid
         interp_dsc = interp1d(T_seg, DSC_seg, kind='linear',
                               bounds_error=False, fill_value='extrapolate')
         DSC_sample_grid = interp_dsc(T_grid)
 
-        # Three-step cp calculation
-        cp_sample = np.zeros_like(T_grid)
-        cp_sample[valid] = (cp_ref_grid[valid]
-                            * (DSC_sample_grid[valid] - DSC_empty_grid[valid])
-                            / dsc_empty_to_ref[valid]
-                            * (M_REF / M_SAMPLE))
+        # ΔDSC = sample - empty  (µW)
+        delta_DSC = DSC_sample_grid - DSC_empty_grid
 
-        # Integrate cp from T_INT_LOW to T_INT_HIGH → ΔH in J/g
+        # Integrate over 30-100°C
         int_mask = (T_grid >= T_INT_LOW) & (T_grid <= T_INT_HIGH)
-        delta_H = trapezoid(cp_sample[int_mask], T_grid[int_mask])
-
-        # Also compute partial integrals for better analysis
-        cp_avg = trapezoid(cp_sample[int_mask], T_grid[int_mask]) / (T_INT_HIGH - T_INT_LOW)
+        integral = trapezoid(delta_DSC[int_mask], T_grid[int_mask])  # µW·°C
+        delta_H = abs(CONV_FACTOR * integral)  # J/g (endo-positive convention)
 
         results.append({
             'ramp': ramp_idx + 1,
             'T1_hold_min': cond['T1_hold_min'],
             'T2_hold_min': cond['T2_hold_min'],
             'delta_H_Jg': delta_H,
-            'cp_avg_JgK': cp_avg,
-            'cp_at_50C': np.interp(50, T_grid, cp_sample),
-            'cp_at_80C': np.interp(80, T_grid, cp_sample),
-            'cp_at_100C': np.interp(100, T_grid, cp_sample),
+            'integral_uWC': integral,
         })
-        cp_curves.append(cp_sample)
+        dsc_curves.append(delta_DSC)
 
         print(f"    Ramp {ramp_idx+1:2d}: t1={cond['T1_hold_min']:8.4f} min, "
               f"t2={cond['T2_hold_min']:8.4f} min → "
-              f"ΔH = {delta_H:.4f} J/g, cp_avg = {cp_avg:.4f} J/(g·K)")
+              f"ΔH = {delta_H:.4f} J/g")
 
     results_df = pd.DataFrame(results)
-    cp_curves = np.array(cp_curves)
+    dsc_curves = np.array(dsc_curves)
 
-    # ── 6. Generate comprehensive plots ───────────────────────────────────
-    print(f"\n[5/5] Generating plots...")
+    # ── 5. Generate plots ────────────────────────────────────────────────
+    print(f"\n[4/4] Generating plots...")
 
     fig = plt.figure(figsize=(20, 14))
 
-    # --- Panel 1: cp curves for all ramps (color-coded by T1 group) ---
-    ax1 = fig.add_subplot(2, 3, 1)
     t1_short = results_df[results_df['T1_hold_min'] < 1.0]
     t1_long  = results_df[results_df['T1_hold_min'] > 1.0]
+    colors_grp = ['#2166AC', '#B2182B']
+    markers = ['o', 's']
 
-    # T1-short group: cool colors
-    for _, r in t1_short.iterrows():
-        idx = int(r['ramp']) - 1
-        ax1.plot(T_grid, cp_curves[idx], alpha=0.6, linewidth=0.8,
-                 color=plt.cm.Blues(0.4 + 0.5 * idx / len(t1_short)))
-    # T1-long group: warm colors
-    for _, r in t1_long.iterrows():
-        idx = int(r['ramp']) - 1
-        ax1.plot(T_grid, cp_curves[idx], alpha=0.6, linewidth=0.8,
-                 color=plt.cm.Oranges(0.4 + 0.5 * (idx - len(t1_short)) / len(t1_long)))
-
-    # Average curves per group
-    t1s_idx = [int(r['ramp'])-1 for _, r in t1_short.iterrows()]
-    t1l_idx = [int(r['ramp'])-1 for _, r in t1_long.iterrows()]
-    ax1.plot(T_grid, cp_curves[t1s_idx].mean(axis=0), 'b-', linewidth=2.0,
-             label=f'T1=0.833 min (n={len(t1s_idx)})')
-    ax1.plot(T_grid, cp_curves[t1l_idx].mean(axis=0), 'r-', linewidth=2.0,
-             label=f'T1=8.333 min (n={len(t1l_idx)})')
+    # Panel 1: ΔDSC curves (selected)
+    ax1 = fig.add_subplot(2, 3, 1)
+    highlight = [0, 4, 9, 10, 14, 19]
+    labels_h = [1, 5, 10, 11, 15, 20]
+    for idx, lbl in zip(highlight, labels_h):
+        c = conditions[idx]
+        ax1.plot(T_grid, dsc_curves[idx], alpha=0.8, linewidth=0.8,
+                 label=f"R{lbl}: t1={c['T1_hold_min']:.3f},t2={c['T2_hold_min']:.3f}")
     ax1.axvspan(T_INT_LOW, T_INT_HIGH, alpha=0.08, color='green')
     ax1.set_xlabel('Temperature (°C)')
-    ax1.set_ylabel('cp (J/(g·K))')
-    ax1.set_title(f'Specific heat capacity — all ramps by T1 group\n(calibration range {T_grid[0]:.0f}–{T_grid[-1]:.0f} °C)')
-    ax1.legend(fontsize=8)
-    ax1.set_xlim(T_grid[0] - 2, T_grid[-1] + 2)
-    ax1.axvline(T_max, color='gray', linestyle=':', alpha=0.5, linewidth=0.8)
-    ax1.text(T_max + 0.5, cp_curves[:, int_mask].mean() * 0.5,
-             f'empty data ends\nat {T_max:.0f}°C',
-             fontsize=7, color='gray', va='center')
+    ax1.set_ylabel('ΔDSC (sample − empty) (µW)')
+    ax1.set_title('Baseline-subtracted DSC curves (selected)')
+    ax1.legend(fontsize=6, loc='lower right')
+    ax1.set_xlim(28, T_grid[-1] + 2)
+    ax1.axhline(0, color='gray', linestyle='--', alpha=0.3)
 
-    # --- Panel 2: DSC heating curves (T-axis aligned) ---
+    # Panel 2: All ΔDSC curves by group
     ax2 = fig.add_subplot(2, 3, 2)
-    # Show first ramp, a middle ramp, and last ramp from each group
-    highlight_ramps = [0, 4, 9, 10, 14, 19]  # idx in cp_curves
-    labels_ramps = [1, 5, 10, 11, 15, 20]  # user-facing numbers
-    for pi, (idx, lbl) in enumerate(zip(highlight_ramps, labels_ramps)):
-        cond = conditions[idx]
-        s, e = cond['start_idx'], cond['end_idx']
-        ax2.plot(T_ts[s:e+1], DSC_ts[s:e+1], alpha=0.8, linewidth=0.8,
-                 label=f"R{lbl}: t1={cond['T1_hold_min']:.3f},t2={cond['T2_hold_min']:.3f}")
+    t1s_idx = [int(r['ramp'])-1 for _, r in t1_short.iterrows()]
+    t1l_idx = [int(r['ramp'])-1 for _, r in t1_long.iterrows()]
+    for idx in t1s_idx:
+        ax2.plot(T_grid, dsc_curves[idx], alpha=0.4, linewidth=0.5, color=colors_grp[0])
+    for idx in t1l_idx:
+        ax2.plot(T_grid, dsc_curves[idx], alpha=0.4, linewidth=0.5, color=colors_grp[1])
+    ax2.plot(T_grid, dsc_curves[t1s_idx].mean(axis=0), '-', color=colors_grp[0], linewidth=2.0,
+             label=f'T1=0.833 min (n={len(t1s_idx)})')
+    ax2.plot(T_grid, dsc_curves[t1l_idx].mean(axis=0), '-', color=colors_grp[1], linewidth=2.0,
+             label=f'T1=8.333 min (n={len(t1l_idx)})')
+    ax2.axvspan(T_INT_LOW, T_INT_HIGH, alpha=0.08, color='green')
     ax2.set_xlabel('Temperature (°C)')
-    ax2.set_ylabel('DSC signal (µW)')
-    ax2.set_title('Raw DSC heating curves (selected)')
-    ax2.legend(fontsize=6, loc='lower right')
+    ax2.set_ylabel('ΔDSC (µW)')
+    ax2.set_title('All ΔDSC curves by T1 group — Kovacs up-jump')
+    ax2.legend(fontsize=8)
+    ax2.set_xlim(28, T_grid[-1] + 2)
 
-    # --- Panel 3: ΔH vs T2 annealing time (log scale) ---
+    # Panel 3: ΔH vs T2 annealing time (Kovacs hump!)
     ax3 = fig.add_subplot(2, 3, 3)
-    markers = ['o', 's']
-    colors_grp = ['#2166AC', '#B2182B']
     for i, (grp_label, grp_df) in enumerate([('T1=0.833 min', t1_short), ('T1=8.333 min', t1_long)]):
         ax3.plot(grp_df['T2_hold_min'], grp_df['delta_H_Jg'],
                  marker=markers[i], color=colors_grp[i], linewidth=1.8,
@@ -423,50 +305,46 @@ def main():
                  markeredgewidth=1.5, label=grp_label)
     ax3.set_xlabel('T2 hold time at 90°C (min)')
     ax3.set_ylabel(f'ΔH (30–100°C) (J/g)')
-    ax3.set_title('Enthalpy recovery vs T2 annealing time (Kovacs up-jump)')
+    ax3.set_title('Kovacs: Enthalpy recovery vs up-jump annealing time')
     ax3.set_xscale('log')
     ax3.legend(fontsize=9)
     ax3.grid(True, alpha=0.3, which='both')
 
-    # --- Panel 4: ΔH comparison bar chart ---
+    # Panel 4: DSC overshoot near Tg (magnified) — shows Kovacs hump
     ax4 = fig.add_subplot(2, 3, 4)
+    for idx in t1s_idx:
+        ax4.plot(T_grid, dsc_curves[idx], alpha=0.5, linewidth=0.6, color=colors_grp[0])
+    for idx in t1l_idx:
+        ax4.plot(T_grid, dsc_curves[idx], alpha=0.5, linewidth=0.6, color=colors_grp[1])
+    ax4.set_xlabel('Temperature (°C)')
+    ax4.set_ylabel('ΔDSC (µW)')
+    ax4.set_title('Tg region zoom (70–120°C) — Kovacs overshoot')
+    ax4.set_xlim(70, 120)
+    ax4.grid(True, alpha=0.2)
+
+    # Panel 5: ΔH bar chart
+    ax5 = fig.add_subplot(2, 3, 5)
     x_pos = np.arange(len(results_df))
     bar_colors = [colors_grp[0] if t < 1.0 else colors_grp[1]
                   for t in results_df['T1_hold_min']]
-    bars = ax4.bar(x_pos, results_df['delta_H_Jg'], color=bar_colors,
-                   edgecolor='black', linewidth=0.5, alpha=0.85)
-    ax4.set_xticks(x_pos)
-    ax4.set_xticklabels([f"{r['ramp']:.0f}" for _, r in results_df.iterrows()],
+    ax5.bar(x_pos, results_df['delta_H_Jg'], color=bar_colors,
+            edgecolor='black', linewidth=0.5, alpha=0.85)
+    ax5.set_xticks(x_pos)
+    ax5.set_xticklabels([f"{r['ramp']:.0f}" for _, r in results_df.iterrows()],
                         fontsize=7, rotation=45)
-    ax4.set_ylabel(f'ΔH (30–100°C) (J/g)')
-    ax4.set_xlabel('Ramp number')
-    ax4.set_title('ΔH distribution across all annealing conditions')
+    ax5.set_ylabel(f'ΔH (30–100°C) (J/g)')
+    ax5.set_xlabel('Ramp number')
+    ax5.set_title('ΔH distribution — Kovacs up-jump experiment')
+    ax5.axvline(9.5, color='gray', linestyle='--', alpha=0.7)
+    ylim = ax5.get_ylim()
+    ax5.text(4.5, ylim[1] * 0.98, 'T1=0.833 min', ha='center', fontsize=9,
+             fontweight='bold', color=colors_grp[0])
+    ax5.text(14.5, ylim[1] * 0.98, 'T1=8.333 min', ha='center', fontsize=9,
+             fontweight='bold', color=colors_grp[1])
 
-    # Add group separator
-    ax4.axvline(9.5, color='gray', linestyle='--', alpha=0.7)
-    ax4.text(4.5, ax4.get_ylim()[1] * 0.98, 'T1=0.833 min',
-             ha='center', fontsize=9, fontweight='bold', color=colors_grp[0])
-    ax4.text(14.5, ax4.get_ylim()[1] * 0.98, 'T1=8.333 min',
-             ha='center', fontsize=9, fontweight='bold', color=colors_grp[1])
-
-    # --- Panel 5: cp average comparison ---
-    ax5 = fig.add_subplot(2, 3, 5)
-    for i, (grp_label, grp_df) in enumerate([('T1=0.833 min', t1_short), ('T1=8.333 min', t1_long)]):
-        ax5.plot(grp_df['T2_hold_min'], grp_df['cp_avg_JgK'],
-                 marker=markers[i], color=colors_grp[i], linewidth=1.8,
-                 markersize=9, markerfacecolor='white',
-                 markeredgewidth=1.5, label=grp_label)
-    ax5.set_xlabel('T2 hold time at 90°C (min)')
-    ax5.set_ylabel('Average cp (30–100°C) (J/(g·K))')
-    ax5.set_title('Average cp vs T2 annealing time (Kovacs up-jump)')
-    ax5.set_xscale('log')
-    ax5.legend(fontsize=9)
-    ax5.grid(True, alpha=0.3, which='both')
-
-    # --- Panel 6: Summary table ---
+    # Panel 6: Summary table
     ax6 = fig.add_subplot(2, 3, 6)
     ax6.axis('off')
-    # Create formatted table
     table_data = []
     for _, r in results_df.iterrows():
         table_data.append([
@@ -474,67 +352,58 @@ def main():
             f"{r['T1_hold_min']:.3f}",
             f"{r['T2_hold_min']:.3f}",
             f"{r['delta_H_Jg']:.3f}",
-            f"{r['cp_avg_JgK']:.3f}",
         ])
-    # Split into two columns (group A and B)
-    col_labels = ['Ramp', 't1@80°C\n(min)', 't2@90°C\n(min)', 'ΔH\n(J/g)', 'cp_avg\nJ/(g·K)']
+    col_labels = ['Ramp', 't1@80°C\n(min)', 't2@90°C\n(min)', 'ΔH\n(J/g)']
 
-    # Add group headers
-    table_nrows = len(table_data)
     table = ax6.table(cellText=table_data, colLabels=col_labels,
                       cellLoc='center', loc='center',
-                      colWidths=[0.08, 0.16, 0.16, 0.16, 0.18])
+                      colWidths=[0.08, 0.18, 0.18, 0.18])
     table.auto_set_font_size(False)
-    table.set_fontsize(6.5)
-    table.scale(1.0, 1.15)
-
-    # Color-code rows by T1 group
-    for row_idx in range(table_nrows):
-        for col_idx in range(5):
+    table.set_fontsize(7)
+    table.scale(1.0, 1.2)
+    for row_idx in range(len(table_data)):
+        for col_idx in range(4):
             cell = table[row_idx + 1, col_idx]
             if row_idx < 10:
-                cell.set_facecolor('#E3EDF8')  # light blue
+                cell.set_facecolor('#E3EDF8')
             else:
-                cell.set_facecolor('#FDE0DD')  # light red
-
+                cell.set_facecolor('#FDE0DD')
     ax6.set_title('Results Summary', fontsize=12, fontweight='bold', pad=5)
 
     plt.tight_layout(pad=2)
-    plt.savefig(os.path.join(RESULTS_DIR, 'kovacs_enthalpy_results.png'), dpi=150, bbox_inches='tight')
-    print(f"  Saved {os.path.join(RESULTS_DIR, 'kovacs_enthalpy_results.png')}")
+    out_png = os.path.join(RESULTS_DIR, 'kovacs_enthalpy_results.png')
+    plt.savefig(out_png, dpi=150, bbox_inches='tight')
+    print(f"  Saved {out_png}")
 
-    # Save results to CSV
-    results_df.to_csv(os.path.join(RESULTS_DIR, 'kovacs_enthalpy_results.csv'), index=False, float_format='%.6f')
-    print(f"  Saved {os.path.join(RESULTS_DIR, 'kovacs_enthalpy_results.csv')}")
+    out_csv = os.path.join(RESULTS_DIR, 'kovacs_enthalpy_results.csv')
+    results_df.to_csv(out_csv, index=False, float_format='%.6f')
+    print(f"  Saved {out_csv}")
 
     # ── Print summary ─────────────────────────────────────────────────────
     print("\n" + "=" * 70)
     print("  RESULTS SUMMARY — Kovacs-type annealing of Polystyrene")
+    print(f"  Method: direct heat-flow integration ({T_INT_LOW}–{T_INT_HIGH}°C)")
     print("=" * 70)
-    print(f"\n{'Ramp':<6} {'t1@80°C':>10}  {'t2@90°C':>10}  {'ΔH(30-100°C)':>14}  {'cp_avg':>10}")
-    print(f"{'':6} {'(min)':>10}  {'(min)':>10}  {'(J/g)':>14}  {'J/(g·K)':>10}")
-    print("-" * 60)
+    print(f"\n{'Ramp':<6} {'t1@80°C':>10}  {'t2@90°C':>10}  {'ΔH':>10}")
+    print(f"{'':6} {'(min)':>10}  {'(min)':>10}  {'(J/g)':>10}")
+    print("-" * 45)
     for _, r in results_df.iterrows():
         print(f"  {r['ramp']:<4.0f}  {r['T1_hold_min']:>10.4f}  {r['T2_hold_min']:>10.4f}  "
-              f"{r['delta_H_Jg']:>14.4f}  {r['cp_avg_JgK']:>10.4f}")
-    print("-" * 60)
+              f"{r['delta_H_Jg']:>10.4f}")
+    print("-" * 45)
 
-    # Group statistics
     grp_a = results_df[results_df['T1_hold_min'] < 1.0]
     grp_b = results_df[results_df['T1_hold_min'] > 1.0]
 
     print(f"\n  Group A (T1@80°C = 0.833 min, short):")
     print(f"    ΔH: {grp_a['delta_H_Jg'].min():.4f} – {grp_a['delta_H_Jg'].max():.4f} J/g")
     print(f"    ΔH mean ± std: {grp_a['delta_H_Jg'].mean():.4f} ± {grp_a['delta_H_Jg'].std():.4f} J/g")
-    print(f"    cp_avg mean ± std: {grp_a['cp_avg_JgK'].mean():.4f} ± {grp_a['cp_avg_JgK'].std():.4f} J/(g·K)")
 
     print(f"\n  Group B (T1@80°C = 8.333 min, long):")
     print(f"    ΔH: {grp_b['delta_H_Jg'].min():.4f} – {grp_b['delta_H_Jg'].max():.4f} J/g")
     print(f"    ΔH mean ± std: {grp_b['delta_H_Jg'].mean():.4f} ± {grp_b['delta_H_Jg'].std():.4f} J/g")
-    print(f"    cp_avg mean ± std: {grp_b['cp_avg_JgK'].mean():.4f} ± {grp_b['cp_avg_JgK'].std():.4f} J/(g·K)")
 
-    Δ_H_diff = grp_a['delta_H_Jg'].mean() - grp_b['delta_H_Jg'].mean()
-    print(f"\n  Δ(ΔH) between groups: {Δ_H_diff:.4f} J/g (A − B)")
+    print(f"\n  Δ(ΔH) between groups: {grp_a['delta_H_Jg'].mean() - grp_b['delta_H_Jg'].mean():.4f} J/g (A − B)")
     print(f"  Overall ΔH range: {results_df['delta_H_Jg'].min():.4f} – {results_df['delta_H_Jg'].max():.4f} J/g")
 
     return results_df
