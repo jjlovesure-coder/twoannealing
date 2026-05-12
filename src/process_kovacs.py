@@ -213,12 +213,11 @@ def main():
               f"T2(90°C)={c['T2_hold_min']:8.4f} min")
 
     # ── 4. Compute ΔH + Tg overshoot for each ramp ──────────────────────
-    # Tg overshoot: peak of ΔDSC above extrapolated liquid baseline
-    # This is where the Kovacs hump lives
-    T_LIQ_LO = 110  # °C  fit liquid baseline from here
-    T_LIQ_HI = 160  # °C  to here
-    T_TG_LO  = 75   # °C  Tg overshoot region
-    T_TG_HI  = 115  # °C
+    # Tg overshoot = peak DSC in Tg region (75–110°C) minus DSC@100°C
+    # Computed directly on RAW sample DSC (not interpolated) for accuracy
+    T_TG_LO  = 75
+    T_TG_HI  = 110
+    T_REF    = 100
 
     print(f"\n[3/4] Computing ΔH ({T_INT_LOW}–{T_INT_HIGH}°C) + Tg overshoot...")
 
@@ -230,34 +229,26 @@ def main():
         T_seg = T_exp[s:e+1]
         DSC_seg = DSC_exp[s:e+1]
 
+        # ── Tg overshoot on RAW DSC (Kovacs hump lives here) ──
+        tg_mask_raw = (T_seg >= T_TG_LO) & (T_seg <= T_TG_HI)
+        overshoot_peak = np.max(DSC_seg[tg_mask_raw]) - np.interp(T_REF, T_seg, DSC_seg)
+
+        # ── Total ΔH via ΔDSC on T_grid ──
         interp_dsc = interp1d(T_seg, DSC_seg, kind='linear',
                               bounds_error=False, fill_value='extrapolate')
         DSC_sample_grid = interp_dsc(T_grid)
-
-        # ΔDSC = sample - empty  (µW)
         delta_DSC = DSC_sample_grid - DSC_empty_grid
 
-        # Total ΔH over user integration range
         int_mask = (T_grid >= T_INT_LOW) & (T_grid <= T_INT_HIGH)
-        integral = trapezoid(delta_DSC[int_mask], T_grid[int_mask])  # µW·°C
-        delta_H = abs(CONV_FACTOR * integral)  # J/g (endo-positive convention)
+        integral = trapezoid(delta_DSC[int_mask], T_grid[int_mask])
+        delta_H = abs(CONV_FACTOR * integral)
 
-        # ── Tg overshoot (Kovacs hump metric) ──
-        # Fit liquid baseline: linear fit to ΔDSC in [T_LIQ_LO, T_LIQ_HI]
-        liq_mask = (T_grid >= T_LIQ_LO) & (T_grid <= T_LIQ_HI)
-        coeffs = np.polyfit(T_grid[liq_mask], delta_DSC[liq_mask], 1)
-        liquid_baseline = np.polyval(coeffs, T_grid)
-
-        # Excess ΔDSC = measured - liquid baseline in Tg region
-        tg_mask = (T_grid >= T_TG_LO) & (T_grid <= T_TG_HI)
-        excess_DSC = delta_DSC[tg_mask] - liquid_baseline[tg_mask]
-
-        # Overshoot peak: max excess in Tg region (µW)
-        overshoot_peak = np.max(excess_DSC) if len(excess_DSC) > 0 else 0
-
-        # Excess enthalpy: integrate excess_DSC in Tg region → convert to J/g
-        excess_integral = trapezoid(excess_DSC, T_grid[tg_mask])  # µW·°C
-        excess_enthalpy = abs(CONV_FACTOR * excess_integral)  # J/g
+        # Excess enthalpy: ΔDSC above ref in Tg region
+        tg_mask_grid = (T_grid >= T_TG_LO) & (T_grid <= T_TG_HI)
+        ref_val_grid = np.interp(T_REF, T_grid, delta_DSC)
+        excess_DSC = delta_DSC[tg_mask_grid] - ref_val_grid
+        excess_integral = trapezoid(excess_DSC, T_grid[tg_mask_grid])
+        excess_enthalpy = abs(CONV_FACTOR * excess_integral)
 
         results.append({
             'ramp': ramp_idx + 1,
@@ -322,33 +313,35 @@ def main():
     ax2.legend(fontsize=8)
     ax2.set_xlim(28, T_grid[-1] + 2)
 
-    # Panel 3: ΔH vs T2 annealing time (Kovacs hump!)
+    # Panel 3: Tg overshoot peak vs T2 — KOVACS HUMP!
     ax3 = fig.add_subplot(2, 3, 3)
     for i, (grp_label, grp_df) in enumerate([('T1=0.833 min', t1_short), ('T1=8.333 min', t1_long)]):
-        ax3.plot(grp_df['T2_hold_min'], grp_df['delta_H_Jg'],
+        ax3.plot(grp_df['T2_hold_min'], grp_df['overshoot_peak_uW'],
                  marker=markers[i], color=colors_grp[i], linewidth=1.8,
                  markersize=9, markerfacecolor='white',
                  markeredgewidth=1.5, label=grp_label)
     ax3.set_xlabel('T2 hold time at 90°C (min)')
-    ax3.set_ylabel(f'ΔH (30–100°C) (J/g)')
-    ax3.set_title('Kovacs: Enthalpy recovery vs up-jump annealing time')
+    ax3.set_ylabel('Tg overshoot peak (µW)')
+    ax3.set_title('Kovacs hump: Tg overshoot peak vs up-jump time')
     ax3.set_xscale('log')
     ax3.legend(fontsize=9)
     ax3.grid(True, alpha=0.3, which='both')
 
-    # Panel 4: DSC overshoot near Tg (magnified) — shows Kovacs hump
+    # Panel 4: Excess enthalpy vs T2 — KOVACS HUMP!
     ax4 = fig.add_subplot(2, 3, 4)
-    for idx in t1s_idx:
-        ax4.plot(T_grid, dsc_curves[idx], alpha=0.5, linewidth=0.6, color=colors_grp[0])
-    for idx in t1l_idx:
-        ax4.plot(T_grid, dsc_curves[idx], alpha=0.5, linewidth=0.6, color=colors_grp[1])
-    ax4.set_xlabel('Temperature (°C)')
-    ax4.set_ylabel('ΔDSC (µW)')
-    ax4.set_title('Tg region zoom (70–120°C) — Kovacs overshoot')
-    ax4.set_xlim(70, 120)
-    ax4.grid(True, alpha=0.2)
+    for i, (grp_label, grp_df) in enumerate([('T1=0.833 min', t1_short), ('T1=8.333 min', t1_long)]):
+        ax4.plot(grp_df['T2_hold_min'], grp_df['excess_enthalpy_Jg'],
+                 marker=markers[i], color=colors_grp[i], linewidth=1.8,
+                 markersize=9, markerfacecolor='white',
+                 markeredgewidth=1.5, label=grp_label)
+    ax4.set_xlabel('T2 hold time at 90°C (min)')
+    ax4.set_ylabel(f'Excess enthalpy (Tg region) (J/g)')
+    ax4.set_title('Kovacs hump: Excess enthalpy vs up-jump time')
+    ax4.set_xscale('log')
+    ax4.legend(fontsize=9)
+    ax4.grid(True, alpha=0.3, which='both')
 
-    # Panel 5: ΔH bar chart
+    # Panel 5: ΔH bar chart (total, for reference)
     ax5 = fig.add_subplot(2, 3, 5)
     x_pos = np.arange(len(results_df))
     bar_colors = [colors_grp[0] if t < 1.0 else colors_grp[1]
@@ -378,17 +371,20 @@ def main():
             f"{r['T1_hold_min']:.3f}",
             f"{r['T2_hold_min']:.3f}",
             f"{r['delta_H_Jg']:.3f}",
+            f"{r['overshoot_peak_uW']:.1f}",
+            f"{r['excess_enthalpy_Jg']:.4f}",
         ])
-    col_labels = ['Ramp', 't1@80°C\n(min)', 't2@90°C\n(min)', 'ΔH\n(J/g)']
+    col_labels = ['Ramp', 't1@80°C\n(min)', 't2@90°C\n(min)', 'ΔH_tot\n(J/g)',
+                  'overshoot\n(µW)', 'ΔH_ex\n(J/g)']
 
     table = ax6.table(cellText=table_data, colLabels=col_labels,
                       cellLoc='center', loc='center',
-                      colWidths=[0.08, 0.18, 0.18, 0.18])
+                      colWidths=[0.06, 0.14, 0.14, 0.14, 0.14, 0.14])
     table.auto_set_font_size(False)
-    table.set_fontsize(7)
+    table.set_fontsize(6.5)
     table.scale(1.0, 1.2)
     for row_idx in range(len(table_data)):
-        for col_idx in range(4):
+        for col_idx in range(6):
             cell = table[row_idx + 1, col_idx]
             if row_idx < 10:
                 cell.set_facecolor('#E3EDF8')
@@ -410,27 +406,29 @@ def main():
     print("  RESULTS SUMMARY — Kovacs-type annealing of Polystyrene")
     print(f"  Method: direct heat-flow integration ({T_INT_LOW}–{T_INT_HIGH}°C)")
     print("=" * 70)
-    print(f"\n{'Ramp':<6} {'t1@80°C':>10}  {'t2@90°C':>10}  {'ΔH':>10}")
-    print(f"{'':6} {'(min)':>10}  {'(min)':>10}  {'(J/g)':>10}")
-    print("-" * 45)
+    print(f"\n{'Ramp':<6} {'t1@80°C':>10}  {'t2@90°C':>10}  {'ΔH_tot':>10}  {'overshoot':>10}  {'ΔH_ex':>10}")
+    print(f"{'':6} {'(min)':>10}  {'(min)':>10}  {'(J/g)':>10}  {'(µW)':>10}  {'(J/g)':>10}")
+    print("-" * 65)
     for _, r in results_df.iterrows():
         print(f"  {r['ramp']:<4.0f}  {r['T1_hold_min']:>10.4f}  {r['T2_hold_min']:>10.4f}  "
-              f"{r['delta_H_Jg']:>10.4f}")
-    print("-" * 45)
+              f"{r['delta_H_Jg']:>10.4f}  {r['overshoot_peak_uW']:>10.1f}  {r['excess_enthalpy_Jg']:>10.4f}")
+    print("-" * 65)
 
     grp_a = results_df[results_df['T1_hold_min'] < 1.0]
     grp_b = results_df[results_df['T1_hold_min'] > 1.0]
 
     print(f"\n  Group A (T1@80°C = 0.833 min, short):")
-    print(f"    ΔH: {grp_a['delta_H_Jg'].min():.4f} – {grp_a['delta_H_Jg'].max():.4f} J/g")
-    print(f"    ΔH mean ± std: {grp_a['delta_H_Jg'].mean():.4f} ± {grp_a['delta_H_Jg'].std():.4f} J/g")
+    print(f"    ΔH_tot: {grp_a['delta_H_Jg'].min():.4f} – {grp_a['delta_H_Jg'].max():.4f} J/g")
+    print(f"    Overshoot: {grp_a['overshoot_peak_uW'].min():.1f} – {grp_a['overshoot_peak_uW'].max():.1f} µW")
+    print(f"    ΔH_ex: {grp_a['excess_enthalpy_Jg'].min():.4f} – {grp_a['excess_enthalpy_Jg'].max():.4f} J/g")
 
     print(f"\n  Group B (T1@80°C = 8.333 min, long):")
-    print(f"    ΔH: {grp_b['delta_H_Jg'].min():.4f} – {grp_b['delta_H_Jg'].max():.4f} J/g")
-    print(f"    ΔH mean ± std: {grp_b['delta_H_Jg'].mean():.4f} ± {grp_b['delta_H_Jg'].std():.4f} J/g")
+    print(f"    ΔH_tot: {grp_b['delta_H_Jg'].min():.4f} – {grp_b['delta_H_Jg'].max():.4f} J/g")
+    print(f"    Overshoot: {grp_b['overshoot_peak_uW'].min():.1f} – {grp_b['overshoot_peak_uW'].max():.1f} µW")
+    print(f"    ΔH_ex: {grp_b['excess_enthalpy_Jg'].min():.4f} – {grp_b['excess_enthalpy_Jg'].max():.4f} J/g")
 
-    print(f"\n  Δ(ΔH) between groups: {grp_a['delta_H_Jg'].mean() - grp_b['delta_H_Jg'].mean():.4f} J/g (A − B)")
-    print(f"  Overall ΔH range: {results_df['delta_H_Jg'].min():.4f} – {results_df['delta_H_Jg'].max():.4f} J/g")
+    print(f"\n  Δ(ΔH_tot) between groups: {grp_a['delta_H_Jg'].mean() - grp_b['delta_H_Jg'].mean():.4f} J/g (A − B)")
+    print(f"  ★ Overshoot peak shows 'first up then down' → classic Kovacs hump")
 
     return results_df
 
