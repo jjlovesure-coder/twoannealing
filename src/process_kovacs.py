@@ -215,7 +215,7 @@ def main():
     # ── 4. Compute ΔH + Tg overshoot for each ramp ──────────────────────
     # Tg overshoot = peak DSC in Tg region (75–110°C) minus DSC@100°C
     # Computed directly on RAW sample DSC (not interpolated) for accuracy
-    T_TG_LO  = 75
+    T_TG_LO  = 30
     T_TG_HI  = 110
     T_REF    = 100
 
