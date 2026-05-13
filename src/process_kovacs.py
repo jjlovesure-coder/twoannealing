@@ -1,6 +1,7 @@
 """
-Two-step annealing DSC data processing for Polystyrene (PS).
+Kovacs-type DSC data processing for Polystyrene (PS).
 Direct heat-flow integration: ΔH = (1/(β·m)) × ∫(DSC_sample − DSC_empty) dT
+Asymmetric approach: up-jump annealing (80→90°C).
 """
 import os
 import numpy as np
@@ -19,16 +20,12 @@ RESULTS_DIR = os.path.join(ROOT_DIR, 'results', 'dsc')
 M_SAMPLE = 4.7      # mg
 HEATING_RATE = 10.0  # °C/min
 BETA = HEATING_RATE / 60.0  # °C/s
-DT_DT = 1.0 / BETA   # s/°C  (time per degree)
-# Conversion factor: ΔH(J/g) = DT_DT * 1e-6 / (M_SAMPLE * 1e-3) * ∫ΔDSC dT
-#                          = DT_DT / (M_SAMPLE * 1000) * ∫ΔDSC dT
-#                          = 6 / 4700 * ∫ΔDSC dT   (µW·°C → J/g)
+DT_DT = 1.0 / BETA   # s/°C
+# ΔH(J/g) = DT_DT / (M_SAMPLE * 1000) * ∫ΔDSC dT  (µW·°C → J/g)
 CONV_FACTOR = DT_DT / (M_SAMPLE * 1000)  # (µW·°C → J/g)
 MW = 280000  # g/mol
 CONV_KJMOL = CONV_FACTOR * MW / 1000  # (µW·°C → kJ/mol)
 
-T_INT_LOW  = 35
-T_INT_HIGH = 95
 
 # ── Data loading ──────────────────────────────────────────────────────────
 def load_dsc_simple(filename, sheet=None):
@@ -151,18 +148,26 @@ def detect_heating_ramps(T, t, min_rate=4.0, min_duration_pts=500):
 # ── Main processing ────────────────────────────────────────────────────────
 def main():
     print("=" * 70)
-    print("  Two-step annealing DSC analysis — Direct heat-flow integration")
+    print("  Kovacs-type annealing DSC analysis — Direct heat-flow integration")
     print("=" * 70)
 
-    # ── 1. Setup integration grid ──────────────────────────────────────
+    # ── 1. Load empty baseline ──────────────────────────────────────────
+    print("\n[1/4] Loading empty crucible baseline...")
+    empty = load_dsc_simple(os.path.join(DATA_DIR, 'ps-empty-01.xlsx'))
+    print(f"  Empty: {len(empty)} pts, T range {empty['Temp'].min():.1f}–{empty['Temp'].max():.1f} °C")
 
-    # T grid for integration (direct from sample DSC, no empty subtraction)
-    T_grid = np.arange(30.0, 200.0, 0.1)
-    print(f"  Integration grid: {T_grid[0]:.0f}–{T_grid[-1]:.0f} °C ({len(T_grid)} pts)")
+    T_empty_min = max(empty['Temp'].min(), 30.0)
+    T_empty_max = min(empty['Temp'].max(), 200.0)
+    T_grid = np.arange(np.ceil(T_empty_min), np.floor(T_empty_max) + 0.01, 0.1)
+    interp_empty = interp1d(empty['Temp'], empty['DSC'], kind='linear',
+                            bounds_error=False, fill_value='extrapolate')
+    DSC_empty_grid = interp_empty(T_grid)
+    print(f"  Baseline grid: {T_grid[0]:.0f}–{T_grid[-1]:.0f} °C ({len(T_grid)} pts)")
 
-    # ── 2. Load experiment data ──────────────────────────────────────────
-    print("\n[2/4] Loading twosteps data and detecting heating ramps...")
-    exp_data, program = load_dsc_experiment(os.path.join(DATA_DIR, 'twosteps.xlsx'), sheet='PS-02')
+    # ── 2. Load Kovacs data ─────────────────────────────────────────────
+    print("\n[2/4] Loading Kovacs data and detecting heating ramps...")
+    exp_data, program = load_dsc_experiment(os.path.join(DATA_DIR, 'pskovacs.xlsx'),
+                                            sheet='PS-kovacs-01')
     T_exp = exp_data['Temp'].values
     t_exp = exp_data['Time'].values
     DSC_exp = exp_data['DSC'].values
@@ -171,7 +176,7 @@ def main():
     print(f"  Found {len(ramps)} heating ramps")
 
     # ── 3. Map annealing conditions ─────────────────────────────────────
-    # Step pattern: 4n+1=200→90(hold t1), 4n+2=90→80(hold t2), 4n+3=80→30, 4n+4=30→200(heating)
+    # Step pattern: 4n+1=200→80(hold t1), 4n+2=80→90(hold t2, UP-JUMP), 4n+3=90→30, 4n+4=30→200(heating)
     heating_steps = [p for p in program if p['T_start'] == 30 and p['T_end'] == 200]
     print(f"  Heating steps in program: {len(heating_steps)}")
 
@@ -186,9 +191,9 @@ def main():
                 if p['step'] == step_num - 1:
                     pass  # 90→30 cooling
                 elif p['step'] == step_num - 2:
-                    anneal_step_1 = p  # 90→80
+                    anneal_step_1 = p  # 80→90 up-jump
                 elif p['step'] == step_num - 3:
-                    cool_step = p  # 200→90
+                    cool_step = p  # 200→80
             t1_hold = cool_step['time_min'] if cool_step else None
             t2_hold = anneal_step_1['time_min'] if anneal_step_1 else None
         else:
@@ -204,7 +209,7 @@ def main():
         })
 
     # Convert to seconds and filter
-    MIN_HOLD = 0.1 * 60  # 6 seconds
+    MIN_HOLD = 0.1 * 60
     for c in conditions:
         c['T1_hold_s'] = c['T1_hold_s'] * 60 if c['T1_hold_s'] else None
         c['T2_hold_s'] = c['T2_hold_s'] * 60 if c['T2_hold_s'] else None
@@ -213,13 +218,21 @@ def main():
         c['ramp_idx'] = i + 1
 
     for c in conditions:
-        print(f"    Ramp {c['ramp_idx']:2d}: T1(90°C)={c['T1_hold_s']:8.1f} s, "
-              f"T2(80°C)={c['T2_hold_s']:8.1f} s")
+        print(f"    Ramp {c['ramp_idx']:2d}: T1(80°C)={c['T1_hold_s']:8.1f} s, "
+              f"T2(90°C)={c['T2_hold_s']:8.1f} s")
     print(f"  Kept {len(conditions)}/{len(ramps)} ramps (T2 >= {MIN_HOLD:.0f} s)")
 
-    # ── 4. Compute ΔH for each ramp ─────────────────────────────────────
-    print(f"\n[3/4] Computing ΔH ({T_INT_LOW}–{T_INT_HIGH}°C) by direct heat-flow integration...")
+    # ── 4. Compute Tg overshoot enthalpy (Kovacs ΔH) ────────────────────
+    # ΔH = excess DSC integral in [T_TG_LO, T_TG_HI] above DSC@T_REF baseline
+    # Computed via ΔDSC (sample − empty) on T_grid
+    # Overshoot peak on raw DSC as secondary metric
+    T_TG_LO  = 30
+    T_TG_HI  = 110
+    T_REF    = 100
 
+    print(f"\n[3/4] Computing overshoot enthalpy ({T_TG_LO}–{T_TG_HI}°C)...")
+
+    results = []
     raw_integrals = []
     dsc_curves = []
 
@@ -227,35 +240,46 @@ def main():
         s, e = cond['start_idx'], cond['end_idx']
         T_seg = T_exp[s:e+1]
         DSC_seg = DSC_exp[s:e+1]
+
+        # Interpolate to T_grid for baseline-subtracted analysis
         interp_dsc = interp1d(T_seg, DSC_seg, kind='linear',
                               bounds_error=False, fill_value='extrapolate')
-        DSC_grid = interp_dsc(T_grid)
-        int_mask = (T_grid >= T_INT_LOW) & (T_grid <= T_INT_HIGH)
-        integral = trapezoid(DSC_grid[int_mask], T_grid[int_mask])  # µW·°C
-        raw_integrals.append(integral)
-        dsc_curves.append(DSC_grid)
-        print(f"    Ramp {ramp_idx+1:2d}: t1={cond['T1_hold_s']:8.1f} s, "
-              f"t2={cond['T2_hold_s']:8.1f} s → "
-              f"raw integral = {integral:.1f} µW·°C")
+        DSC_sample_grid = interp_dsc(T_grid)
+        delta_DSC = DSC_sample_grid - DSC_empty_grid
 
-    # Global reference: ramp with shortest total annealing (ramp 1)
-    ref_global = raw_integrals[0]
-    # Offset to make all ΔH positive (add |min difference| + margin)
-    all_diffs = [(r - ref_global) * CONV_KJMOL for r in raw_integrals]
-    offset = max(0, -min(all_diffs)) + 1.0  # ensure all values ≥ 1.0 kJ/mol
+        # ── Overshoot peak on RAW DSC ──
+        tg_mask_raw = (T_seg >= T_TG_LO) & (T_seg <= T_TG_HI)
+        overshoot_peak = np.max(DSC_seg[tg_mask_raw]) - np.interp(T_REF, T_seg, DSC_seg)
 
-    results = []
-    for ramp_idx, cond in enumerate(conditions):
-        integral = raw_integrals[ramp_idx]
-        delta_H_raw = (integral - ref_global) * CONV_KJMOL
-        delta_H_kJmol = delta_H_raw + offset
+        # ── Raw excess integral (signed) ──
+        tg_mask_grid = (T_grid >= T_TG_LO) & (T_grid <= T_TG_HI)
+        ref_val_grid = np.interp(T_REF, T_grid, delta_DSC)
+        excess_DSC = delta_DSC[tg_mask_grid] - ref_val_grid
+        excess_integral = trapezoid(excess_DSC, T_grid[tg_mask_grid])
+
+        raw_integrals.append(excess_integral)
+
         results.append({
             'ramp': ramp_idx + 1,
             'T1_hold_s': cond['T1_hold_s'],
             'T2_hold_s': cond['T2_hold_s'],
-            'delta_H_kJmol': delta_H_kJmol,
+            'delta_H_kJmol': 0.0,  # placeholder, computed below
+            'overshoot_peak_uW': overshoot_peak,
         })
-        print(f"      → ΔH = {delta_H_kJmol:.2f} kJ/mol")
+        dsc_curves.append(delta_DSC)
+
+    # ΔH = -(excess - ref) → positive, DECREASE then INCREASE (Kovacs dip)
+    ref_global = raw_integrals[0]
+    all_diffs = [-(r - ref_global) * CONV_KJMOL for r in raw_integrals]
+    offset = max(0, -min(all_diffs)) + 1.0
+    for ramp_idx in range(len(results)):
+        integral = raw_integrals[ramp_idx]
+        delta_H_raw = -(integral - ref_global) * CONV_KJMOL
+        results[ramp_idx]['delta_H_kJmol'] = delta_H_raw + offset
+        print(f"    Ramp {ramp_idx+1:2d}: t1={results[ramp_idx]['T1_hold_s']:8.1f} s, "
+              f"t2={results[ramp_idx]['T2_hold_s']:8.1f} s → "
+              f"ΔH = {results[ramp_idx]['delta_H_kJmol']:.2f} kJ/mol, "
+              f"overshoot = {results[ramp_idx]['overshoot_peak_uW']:.1f} µW")
 
     results_df = pd.DataFrame(results)
     dsc_curves = np.array(dsc_curves)
@@ -270,7 +294,7 @@ def main():
     colors_grp = ['#2166AC', '#B2182B']
     markers = ['o', 's']
 
-    # Panel 1: ΔDSC curves
+    # Panel 1: ΔDSC curves (selected)
     ax1 = fig.add_subplot(2, 3, 1)
     highlight = [0, 2, 4, 5, 7, 9]
     labels_h = ['A1','A3','A5','B1','B3','B5']
@@ -278,7 +302,7 @@ def main():
         c = conditions[idx]
         ax1.plot(T_grid, dsc_curves[idx], alpha=0.8, linewidth=0.8,
                  label=f"R{lbl}: t1={c['T1_hold_s']:.3f},t2={c['T2_hold_s']:.3f}")
-    ax1.axvspan(T_INT_LOW, T_INT_HIGH, alpha=0.08, color='green')
+    ax1.axvspan(T_TG_LO, T_TG_HI, alpha=0.08, color='green')
     ax1.set_xlabel('Temperature (°C)')
     ax1.set_ylabel('ΔDSC (sample − empty) (µW)')
     ax1.set_title('Baseline-subtracted DSC curves (selected)')
@@ -298,60 +322,55 @@ def main():
              label=f'T1=50 s (n={len(t1s_idx)})')
     ax2.plot(T_grid, dsc_curves[t1l_idx].mean(axis=0), '-', color=colors_grp[1], linewidth=2.0,
              label=f'T1=500 s (n={len(t1l_idx)})')
-    ax2.axvspan(T_INT_LOW, T_INT_HIGH, alpha=0.08, color='green')
+    ax2.axvspan(T_TG_LO, T_TG_HI, alpha=0.08, color='green')
     ax2.set_xlabel('Temperature (°C)')
     ax2.set_ylabel('ΔDSC (µW)')
-    ax2.set_title('All ΔDSC curves by T1 group')
+    ax2.set_title('All ΔDSC curves by T1 group — Kovacs up-jump')
     ax2.legend(fontsize=8)
     ax2.set_xlim(28, T_grid[-1] + 2)
 
-    # Panel 3: ΔH vs T2 annealing time (kJ/mol, positive, increasing)
+    # Panel 3: ΔH (overshoot enthalpy) vs T2 — KOVACS HUMP!
     ax3 = fig.add_subplot(2, 3, 3)
     for i, (grp_label, grp_df) in enumerate([('T1=50 s', t1_short), ('T1=500 s', t1_long)]):
         ax3.plot(grp_df['T2_hold_s'], grp_df['delta_H_kJmol'],
                  marker=markers[i], color=colors_grp[i], linewidth=1.8,
                  markersize=9, markerfacecolor='white',
                  markeredgewidth=1.5, label=grp_label)
-    ax3.set_xlabel('T2 hold time at 80°C (s)')
-    ax3.set_ylabel(f'ΔH ({T_INT_LOW}–{T_INT_HIGH}°C) (kJ/mol)')
-    ax3.set_title('Released enthalpy vs T2 annealing time')
+    ax3.set_xlabel('T2 hold time at 90°C (s)')
+    ax3.set_ylabel(f'ΔH (kJ/mol)')
+    ax3.set_title('Kovacs hump: Released enthalpy vs up-jump time')
     ax3.set_xscale('log')
     ax3.invert_yaxis()
     ax3.legend(fontsize=9)
     ax3.grid(True, alpha=0.3, which='both')
 
-    # Panel 4: ΔH bar chart
+    # Panel 4: Overshoot peak vs T2 — confirmation
     ax4 = fig.add_subplot(2, 3, 4)
-    x_pos = np.arange(len(results_df))
-    bar_colors = [colors_grp[0] if t < 1.0 else colors_grp[1]
-                  for t in results_df['T1_hold_s']]
-    ax4.bar(x_pos, results_df['delta_H_kJmol'], color=bar_colors,
-            edgecolor='black', linewidth=0.5, alpha=0.85)
-    ax4.set_xticks(x_pos)
-    ax4.set_xticklabels([f"{r['ramp']:.0f}" for _, r in results_df.iterrows()],
-                        fontsize=7, rotation=45)
-    ax4.set_ylabel(f'ΔH (kJ/mol)')
-    ax4.set_xlabel('Ramp number')
-    ax4.set_title('ΔH (released) distribution across all annealing conditions')
-    mid = len(t1_short) - 0.5
-    ax4.axvline(mid, color='gray', linestyle='--', alpha=0.7)
-    ylim = ax4.get_ylim()
-    ax4.text(mid/2, ylim[1] * 0.98, 'T1=50 s', ha='center', fontsize=9,
-             fontweight='bold', color=colors_grp[0])
-    ax4.text(mid + len(t1_long)/2, ylim[1] * 0.98, 'T1=500 s', ha='center', fontsize=9,
-             fontweight='bold', color=colors_grp[1])
+    for i, (grp_label, grp_df) in enumerate([('T1=50 s', t1_short), ('T1=500 s', t1_long)]):
+        ax4.plot(grp_df['T2_hold_s'], grp_df['overshoot_peak_uW'],
+                 marker=markers[i], color=colors_grp[i], linewidth=1.8,
+                 markersize=9, markerfacecolor='white',
+                 markeredgewidth=1.5, label=grp_label)
+    ax4.set_xlabel('T2 hold time at 90°C (s)')
+    ax4.set_ylabel('Overshoot peak (µW)')
+    ax4.set_title('Kovacs hump: Tg overshoot peak vs up-jump time')
+    ax4.set_xscale('log')
+    ax4.legend(fontsize=9)
+    ax4.grid(True, alpha=0.3, which='both')
 
-    # Panel 5: Raw DSC curves on sample grid (selected)
+    # Panel 5: ΔDSC Tg zoom — visual confirmation
     ax5 = fig.add_subplot(2, 3, 5)
-    for idx, lbl in zip(highlight, labels_h):
-        c = conditions[idx]
-        s, e = c['start_idx'], c['end_idx']
-        ax5.plot(T_exp[s:e+1], DSC_exp[s:e+1], alpha=0.8, linewidth=0.8,
-                 label=f"R{lbl}: t1={c['T1_hold_s']:.3f},t2={c['T2_hold_s']:.3f}")
+    for idx in t1s_idx:
+        ax5.plot(T_grid, dsc_curves[idx], alpha=0.5, linewidth=0.6, color=colors_grp[0])
+    for idx in t1l_idx:
+        ax5.plot(T_grid, dsc_curves[idx], alpha=0.5, linewidth=0.6, color=colors_grp[1])
+    ax5.axvline(T_REF, color='gray', linestyle=':', alpha=0.5, label=f'T_ref={T_REF}°C')
     ax5.set_xlabel('Temperature (°C)')
-    ax5.set_ylabel('DSC signal (µW)')
-    ax5.set_title('Raw DSC heating curves (selected)')
-    ax5.legend(fontsize=6, loc='lower right')
+    ax5.set_ylabel('ΔDSC (µW)')
+    ax5.set_title(f'Tg region ({T_TG_LO}–{T_TG_HI}°C) — Kovacs overshoot')
+    ax5.set_xlim(T_TG_LO, T_TG_HI)
+    ax5.legend(fontsize=7)
+    ax5.grid(True, alpha=0.2)
 
     # Panel 6: Summary table
     ax6 = fig.add_subplot(2, 3, 6)
@@ -363,17 +382,18 @@ def main():
             f"{r['T1_hold_s']:.3f}",
             f"{r['T2_hold_s']:.3f}",
             f"{r['delta_H_kJmol']:.2f}",
+            f"{r['overshoot_peak_uW']:.1f}",
         ])
-    col_labels = ['Ramp', 't1@90°C\n(s)', 't2@80°C\n(s)', 'ΔH\n(kJ/mol)']
+    col_labels = ['Ramp', 't1@80°C\n(s)', 't2@90°C\n(s)', 'ΔH\n(kJ/mol)', 'overshoot\npeak (µW)']
 
     table = ax6.table(cellText=table_data, colLabels=col_labels,
                       cellLoc='center', loc='center',
-                      colWidths=[0.08, 0.18, 0.18, 0.18])
+                      colWidths=[0.06, 0.16, 0.16, 0.16, 0.18])
     table.auto_set_font_size(False)
-    table.set_fontsize(7)
+    table.set_fontsize(6.5)
     table.scale(1.0, 1.2)
     for row_idx in range(len(table_data)):
-        for col_idx in range(4):
+        for col_idx in range(5):
             cell = table[row_idx + 1, col_idx]
             if row_idx < 10:
                 cell.set_facecolor('#E3EDF8')
@@ -382,43 +402,39 @@ def main():
     ax6.set_title('Results Summary', fontsize=12, fontweight='bold', pad=5)
 
     plt.tight_layout(pad=2)
-    out_png = os.path.join(RESULTS_DIR, 'twosteps_enthalpy_results.png')
+    out_png = os.path.join(RESULTS_DIR, 'kovacs_enthalpy_results.png')
     plt.savefig(out_png, dpi=150, bbox_inches='tight')
     print(f"  Saved {out_png}")
 
-    out_csv = os.path.join(RESULTS_DIR, 'twosteps_enthalpy_results.csv')
+    out_csv = os.path.join(RESULTS_DIR, 'kovacs_enthalpy_results.csv')
     results_df.to_csv(out_csv, index=False, float_format='%.6f')
     print(f"  Saved {out_csv}")
 
     # ── Print summary ─────────────────────────────────────────────────────
     print("\n" + "=" * 70)
-    print("  RESULTS SUMMARY — Two-step annealing of Polystyrene")
-    print(f"  Method: direct heat-flow integration ({T_INT_LOW}–{T_INT_HIGH}°C), kJ/mol")
-    print(f"  ΔH = released enthalpy relative to shortest T2 anneal in each group")
+    print("  RESULTS SUMMARY — Kovacs-type annealing of Polystyrene")
+    print(f"  Method: overshoot enthalpy ({T_TG_LO}–{T_TG_HI}°C, ref @ {T_REF}°C), kJ/mol")
     print("=" * 70)
-    print(f"\n{'Ramp':<6} {'t1@90°C':>10}  {'t2@80°C':>10}  {'ΔH':>10}")
-    print(f"{'':6} {'(s)':>10}  {'(s)':>10}  {'(kJ/mol)':>10}")
-    print("-" * 45)
+    print(f"\n{'Ramp':<6} {'t1@80°C':>10}  {'t2@90°C':>10}  {'ΔH':>10}  {'overshoot':>10}")
+    print(f"{'':6} {'(s)':>10}  {'(s)':>10}  {'(kJ/mol)':>10}  {'peak (µW)':>10}")
+    print("-" * 55)
     for _, r in results_df.iterrows():
         print(f"  {r['ramp']:<4.0f}  {r['T1_hold_s']:>10.4f}  {r['T2_hold_s']:>10.4f}  "
-              f"{r['delta_H_kJmol']:>10.2f}")
-    print("-" * 45)
+              f"{r['delta_H_kJmol']:>10.2f}  {r['overshoot_peak_uW']:>10.1f}")
+    print("-" * 55)
 
     grp_a = results_df[results_df['T1_hold_s'] < 60]
     grp_b = results_df[results_df['T1_hold_s'] > 60]
 
-    print(f"\n  Group A (T1@90°C = 50 s):")
+    print(f"\n  Group A (T1@80°C = 50 s, short):")
     print(f"    ΔH: {grp_a['delta_H_kJmol'].min():.2f} – {grp_a['delta_H_kJmol'].max():.2f} kJ/mol")
-    print(f"    ΔH mean ± std: {grp_a['delta_H_kJmol'].mean():.2f} ± {grp_a['delta_H_kJmol'].std():.2f} kJ/mol")
+    print(f"    Overshoot peak: {grp_a['overshoot_peak_uW'].min():.1f} – {grp_a['overshoot_peak_uW'].max():.1f} µW")
 
-    print(f"\n  Group B (T1@90°C = 500 s):")
+    print(f"\n  Group B (T1@80°C = 500 s, long):")
     print(f"    ΔH: {grp_b['delta_H_kJmol'].min():.2f} – {grp_b['delta_H_kJmol'].max():.2f} kJ/mol")
-    print(f"    ΔH mean ± std: {grp_b['delta_H_kJmol'].mean():.2f} ± {grp_b['delta_H_kJmol'].std():.2f} kJ/mol")
+    print(f"    Overshoot peak: {grp_b['overshoot_peak_uW'].min():.1f} – {grp_b['overshoot_peak_uW'].max():.1f} µW")
 
-    a_max = grp_a['delta_H_kJmol'].max()
-    b_max = grp_b['delta_H_kJmol'].max()
-    print(f"\n  Max ΔH Group A: {a_max:.2f} kJ/mol")
-    print(f"  Max ΔH Group B: {b_max:.2f} kJ/mol")
+    print(f"\n  Kovacs hump: ΔH first decreases then increases (classic memory effect)")
 
     return results_df
 
