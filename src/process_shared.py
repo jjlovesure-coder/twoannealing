@@ -82,6 +82,70 @@ def load_dsc_simple(filename, sheet=None):
     return data
 
 
+# ── Empty crucible baseline ──────────────────────────────────────────────
+
+
+def load_empty_crucible(csv_path):
+    """Load empty crucible baseline CSV (single heating ramp 30->~168C).
+
+    Returns T (°C) and DSC (uW) arrays for the heating portion.
+    """
+    df = pd.read_csv(csv_path)
+    T = df['Temp/Cel'].values.astype(float)
+    DSC = df['DSC/uW'].values.astype(float)
+    mask = T >= 30.0
+    return T[mask], DSC[mask]
+
+
+def subtract_empty_crucible(T_sample, DSC_sample, T_empty, DSC_empty):
+    """Interpolate empty crucible DSC to sample T grid and subtract.
+
+    Returns DSC_corrected = DSC_sample - DSC_empty_interp.
+    """
+    f_empty = interp1d(T_empty, DSC_empty, kind='linear',
+                       bounds_error=False, fill_value='extrapolate')
+    DSC_empty_interp = f_empty(T_sample)
+    return DSC_sample - DSC_empty_interp
+
+
+def detect_t_onset(T, DSC_corrected, post_Tg_range=(120, 150)):
+    """Detect supercooled-liquid onset temperature from corrected DSC.
+
+    Fits a linear baseline to the post-Tg region, then scans downward
+    from the high-T end to find where the corrected signal deviates
+    beyond 3x the post-Tg residual noise level.
+
+    Returns T_onset in °C, or 100.0 if detection fails.
+    """
+    post_mask = (T >= post_Tg_range[0]) & (T <= post_Tg_range[1])
+    if np.sum(post_mask) < 5:
+        return 100.0
+
+    post_T = T[post_mask]
+    post_DSC = DSC_corrected[post_mask]
+    coeffs = np.polyfit(post_T, post_DSC, 1)
+    baseline = np.polyval(coeffs, post_T)
+    residuals = post_DSC - baseline
+    noise_std = np.std(residuals)
+    threshold = 3.0 * max(noise_std, 0.01)
+
+    scan_mask = (T >= 80) & (T <= 150)
+    scan_idx = np.where(scan_mask)[0]
+    if len(scan_idx) == 0:
+        return 100.0
+
+    full_baseline = np.polyval(coeffs, T)
+    excess = np.abs(DSC_corrected - full_baseline)
+
+    for i in range(len(scan_idx) - 1, -1, -1):
+        idx = scan_idx[i]
+        if excess[idx] > threshold:
+            T_candidate = T[idx]
+            return float(np.clip(T_candidate, 95, 140))
+
+    return 100.0
+
+
 def load_dsc_experiment(filename, sheet):
     """Load multi-ramp experiment with temperature program table.
 
