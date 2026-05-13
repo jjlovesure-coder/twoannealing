@@ -140,12 +140,9 @@ def process_onestep(data_file, sheet, T_anneal, label):
         else: t_hold = None
         conditions.append({'ramp_idx':idx+1, 'hold_min':t_hold, 'start_idx':s, 'end_idx':e})
 
-    # Convert to seconds, filter
-    MIN_HOLD = 0.1 * 60
+    # Convert to seconds
     for c in conditions:
         c['hold_s'] = c['hold_min']*60 if c['hold_min'] else None
-    conditions = [c for c in conditions if c['hold_s'] and c['hold_s'] >= MIN_HOLD]
-    for i, c in enumerate(conditions): c['ramp_idx'] = i+1
 
     fixed_highs = [90, 95, 100, 105, 110]
     range_labels = [f'30–{h}°C' for h in fixed_highs] + ['30–T_onset']

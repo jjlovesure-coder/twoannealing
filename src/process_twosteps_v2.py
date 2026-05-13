@@ -168,12 +168,10 @@ def main():
         conditions.append({'ramp_idx':idx+1, 'T1_hold_min':t1_hold, 'T2_hold_min':t2_hold,
                           'start_idx':s, 'end_idx':e})
 
-    # Convert to seconds, filter
-    MIN_HOLD = 0.1 * 60
+    # Convert to seconds
     for c in conditions:
         c['T1_hold_s'] = c['T1_hold_min']*60 if c['T1_hold_min'] else None
         c['T2_hold_s'] = c['T2_hold_min']*60 if c['T2_hold_min'] else None
-    conditions = [c for c in conditions if c['T2_hold_s'] and c['T2_hold_s'] >= MIN_HOLD]
 
     # ── Analyze each ramp: find T_onset, compute integrals for multiple ranges ──
     fixed_highs = [90, 95, 100, 105, 110]
