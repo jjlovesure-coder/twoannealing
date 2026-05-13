@@ -130,32 +130,50 @@ class TNMModel:
         return T_f_end, T_f_hold_start
 
     def simulate_two_step(self, T1, t1_hold, T2, t2_hold, T_initial=473.15,
-                          cooling_rate=1.0):
-        """Two-step annealing: cool->hold1->cool->hold2.
+                          cooling_rate=1.0, rate_T1_to_T2=None):
+        """Two-step annealing: cool->hold1->ramp->hold2.
+
+        For down-jump (T2 < T1): ramp is cooling at cooling_rate.
+        For up-jump (T2 > T1, e.g. Kovacs 80->90°C): use rate_T1_to_T2
+        if provided (typically heating_rate = 0.1667 K/s).
+
         Returns (T_f_end_at_T2, T_f_start_of_hold2).
         """
+        if rate_T1_to_T2 is None:
+            rate_T1_to_T2 = cooling_rate
         T_f_1, xi_1 = self._simulate_ramp(T_initial, T1, cooling_rate,
                                            T_initial, 0.0)
         T_f_1e, xi_1e, _ = self._simulate_hold(T1, t1_hold, T_f_1, xi_1)
-        T_f_2, xi_2 = self._simulate_ramp(T1, T2, cooling_rate, T_f_1e, xi_1e)
+        T_f_2, xi_2 = self._simulate_ramp(T1, T2, rate_T1_to_T2, T_f_1e, xi_1e)
         T_f_2e, xi_2e, T_f_hold_start = self._simulate_hold(
             T2, t2_hold, T_f_2, xi_2)
         return T_f_2e, T_f_hold_start
+
+    def delta_H_raw(self, T_anneal, t_hold, T_initial=473.15, cooling_rate=1.0):
+        """One-step delta_H as (T0 - T_f_end) in Kelvin — for direct kJ/mol fitting."""
+        T_f_end, T_f_start = self.simulate_one_step(
+            T_anneal, t_hold, T_initial, cooling_rate)
+        return self.T0 - T_f_end
 
     def delta_H_normalized(self, T_anneal, t_hold, T_initial=473.15,
                            cooling_rate=1.0):
         """One-step delta_H normalized to [0, 1] using T0 reference.
         delta_H = (T0 - T_f_end) / (T0 - T_anneal).
         """
-        T_f_end, T_f_start = self.simulate_one_step(
-            T_anneal, t_hold, T_initial, cooling_rate)
-        return (self.T0 - T_f_end) / (self.T0 - T_anneal)
+        return self.delta_H_raw(T_anneal, t_hold, T_initial, cooling_rate) \
+               / (self.T0 - T_anneal)
 
     def delta_H_two_step(self, T1, t1_hold, T2, t2_hold, T_initial=473.15,
-                         cooling_rate=1.0):
-        """Two-step delta_H normalized using T0 reference.
-        delta_H = (T0 - T_f_end_at_T2) / (T0 - T2).
-        """
+                         cooling_rate=1.0, rate_T1_to_T2=None):
+        """Two-step delta_H as (T0 - T_f_end_at_T2) in Kelvin."""
         T_f_end, T_f_start = self.simulate_two_step(
-            T1, t1_hold, T2, t2_hold, T_initial, cooling_rate)
-        return (self.T0 - T_f_end) / (self.T0 - T2)
+            T1, t1_hold, T2, t2_hold, T_initial, cooling_rate, rate_T1_to_T2)
+        return self.T0 - T_f_end
+
+    def delta_H_two_step_normalized(self, T1, t1_hold, T2, t2_hold,
+                                    T_initial=473.15, cooling_rate=1.0,
+                                    rate_T1_to_T2=None):
+        """Two-step delta_H normalized by (T0 - T2)."""
+        return self.delta_H_two_step(T1, t1_hold, T2, t2_hold,
+                                     T_initial, cooling_rate, rate_T1_to_T2) \
+               / (self.T0 - T2)

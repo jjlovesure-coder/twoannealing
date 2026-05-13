@@ -1,7 +1,10 @@
 """
-Two-step annealing DSC data processing for Polystyrene (PS).
-Direct heat-flow integration: ΔH = (1/(β·m)) × ∫(DSC_sample − DSC_empty) dT
+Two-step annealing DSC data processing — Direct difference method.
+
+Two-step: 200→90°C(hold T1)→80°C(hold T2)→30°C→200°C(measure)
+Per-group reference: shortest T2-hold ramp in each group.
 """
+
 import os
 import numpy as np
 import pandas as pd
@@ -11,414 +14,257 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
+from process_shared import (
+    load_dsc_experiment, detect_heating_ramps, compute_enthalpy,
+    HEATING_T_START, HEATING_T_END,
+)
+
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_DIR = os.path.join(ROOT_DIR, 'data')
 RESULTS_DIR = os.path.join(ROOT_DIR, 'results', 'dsc')
 
-# ── Constants ──────────────────────────────────────────────────────────────
-M_SAMPLE = 4.7      # mg
-HEATING_RATE = 10.0  # °C/min
-BETA = HEATING_RATE / 60.0  # °C/s
-DT_DT = 1.0 / BETA   # s/°C  (time per degree)
-# Conversion factor: ΔH(J/g) = DT_DT * 1e-6 / (M_SAMPLE * 1e-3) * ∫ΔDSC dT
-#                          = DT_DT / (M_SAMPLE * 1000) * ∫ΔDSC dT
-#                          = 6 / 4700 * ∫ΔDSC dT   (µW·°C → J/g)
-CONV_FACTOR = DT_DT / (M_SAMPLE * 1000)  # (µW·°C → J/g)
-MW = 280000  # g/mol
-CONV_KJMOL = CONV_FACTOR * MW / 1000  # (µW·°C → kJ/mol)
-
-T_INT_LOW  = 35
-T_INT_HIGH = 95
-
-# ── Data loading ──────────────────────────────────────────────────────────
-def load_dsc_simple(filename, sheet=None):
-    """Load a simple DSC run (empty or ref) — single 30→200 ramp."""
-    if sheet is None:
-        df = pd.read_excel(filename)
-    else:
-        df = pd.read_excel(filename, sheet_name=sheet)
-
-    header_row = None
-    for i in range(len(df)):
-        v0 = df.iloc[i, 0]
-        if v0 is not None and isinstance(v0, str) and 'Time' in str(v0):
-            header_row = i
-            break
-
-    if header_row is None:
-        for i in range(len(df)):
-            try:
-                a = float(str(df.iloc[i, 0]).strip())
-                b = float(str(df.iloc[i, 1]).strip())
-                if np.isfinite(a) and np.isfinite(b):
-                    header_row = i
-                    break
-            except (ValueError, TypeError):
-                continue
-
-    v0 = df.iloc[header_row, 0]
-    if v0 is not None and isinstance(v0, str) and 'Time' in str(v0):
-        data_start = header_row + 1
-        v0_next = df.iloc[data_start, 0]
-        if v0_next is not None and isinstance(v0_next, str) and 'min' in str(v0_next).lower():
-            data_start += 1
-        data = df.iloc[data_start:].copy()
-    else:
-        data = df.iloc[header_row:].copy()
-
-    data = data.dropna(axis=1, how='all').reset_index(drop=True)
-    ncols = data.shape[1]
-    col_names = ['Time', 'Temp', 'DSC', 'DDSC'] + [f'Extra_{i}' for i in range(max(0, ncols-4))]
-    data.columns = col_names[:ncols] if ncols <= len(col_names) else col_names + [f'Extra_{i}' for i in range(len(col_names), ncols)]
-    data = data[['Time', 'Temp', 'DSC', 'DDSC']].astype(float).reset_index(drop=True)
-    return data
+T_INT_LOW = 70
+T_INT_HIGH = 130
+T_GRID_STEP = 0.2
 
 
-def load_dsc_experiment(filename, sheet):
-    """Load experiment data with temperature program."""
-    df = pd.read_excel(filename, sheet_name=sheet)
+def map_two_step(program, ramps):
+    """Map ramps to two-step annealing conditions.
 
-    program = []
-    for i in range(7, len(df)):
-        v1 = df.iloc[i, 1]
-        if v1 is not None and isinstance(v1, str) and ('温度' in str(v1) or '冷却' in str(v1)):
-            break
-        try:
-            step_str = str(df.iloc[i, 1]).strip()
-            step_num = int(float(step_str))
-            t_start  = float(str(df.iloc[i, 2]).strip())
-            t_end    = float(str(df.iloc[i, 3]).strip())
-            rate     = float(str(df.iloc[i, 4]).strip())
-            time_val = float(str(df.iloc[i, 5]).strip())
-            program.append({
-                'step': step_num,
-                'T_start': t_start,
-                'T_end': t_end,
-                'rate_or_temp': rate,
-                'time_min': time_val,
-            })
-        except (ValueError, TypeError, IndexError):
-            continue
-
-    header_row = None
-    for i in range(90, len(df)):
-        v0 = df.iloc[i, 0]
-        if v0 is not None and isinstance(v0, str) and 'Time' in str(v0):
-            header_row = i
-            break
-
-    data_start = header_row + 2
-    raw = df.iloc[data_start:].copy()
-    data = pd.DataFrame({
-        'Time': pd.to_numeric(raw.iloc[:, 0], errors='coerce'),
-        'Temp': pd.to_numeric(raw.iloc[:, 1], errors='coerce'),
-        'DSC':  pd.to_numeric(raw.iloc[:, 2], errors='coerce'),
-        'DDSC': pd.to_numeric(raw.iloc[:, 3], errors='coerce'),
-    }).dropna().reset_index(drop=True)
-    data = data.astype(float)
-    return data, program
-
-
-def detect_heating_ramps(T, t, min_rate=4.0, min_duration_pts=500):
-    """Detect heating ramps (30→200 at ~10°C/min) using temperature gradient."""
-    n = len(T)
-    window = 30
-    dTdt = np.zeros(n)
-    for i in range(window, n - window):
-        dTdt[i] = (T[i + window] - T[i - window]) / max(t[i + window] - t[i - window], 1e-12)
-
-    is_heating = dTdt > min_rate
-    segments = []
-    in_seg = False
-    start = 0
-    for i in range(n):
-        if is_heating[i] and not in_seg:
-            in_seg = True
-            start = i
-        elif not is_heating[i] and in_seg:
-            if i - start > min_duration_pts:
-                seg_T = T[start:i]
-                if np.min(seg_T) < 40 and np.max(seg_T) > 180:
-                    segments.append((start, i - 1))
-            in_seg = False
-    if in_seg and n - start > min_duration_pts:
-        seg_T = T[start:n]
-        if np.min(seg_T) < 40 and np.max(seg_T) > 180:
-            segments.append((start, n - 1))
-    return segments
-
-
-# ── Main processing ────────────────────────────────────────────────────────
-def main():
-    print("=" * 70)
-    print("  Two-step annealing DSC analysis — Direct heat-flow integration")
-    print("=" * 70)
-
-    # ── 1. Setup integration grid ──────────────────────────────────────
-
-    # T grid for integration (direct from sample DSC, no empty subtraction)
-    T_grid = np.arange(30.0, 200.0, 0.1)
-    print(f"  Integration grid: {T_grid[0]:.0f}–{T_grid[-1]:.0f} °C ({len(T_grid)} pts)")
-
-    # ── 2. Load experiment data ──────────────────────────────────────────
-    print("\n[2/4] Loading twosteps data and detecting heating ramps...")
-    exp_data, program = load_dsc_experiment(os.path.join(DATA_DIR, 'twosteps.xlsx'), sheet='PS-02')
-    T_exp = exp_data['Temp'].values
-    t_exp = exp_data['Time'].values
-    DSC_exp = exp_data['DSC'].values
-
-    ramps = detect_heating_ramps(T_exp, t_exp)
-    print(f"  Found {len(ramps)} heating ramps")
-
-    # ── 3. Map annealing conditions ─────────────────────────────────────
-    # Step pattern: 4n+1=200→90(hold t1), 4n+2=90→80(hold t2), 4n+3=80→30, 4n+4=30→200(heating)
-    heating_steps = [p for p in program if p['T_start'] == 30 and p['T_end'] == 200]
-    print(f"  Heating steps in program: {len(heating_steps)}")
+    Pattern: step 4n+1=200→90(hold T1), 4n+2=90→80(hold T2),
+    4n+3=80→30, 4n+4=30→200(heating).
+    """
+    heating_steps = [p for p in program
+                     if p['T_start'] == HEATING_T_START and
+                     p['T_end'] == HEATING_T_END]
 
     conditions = []
     for idx, (s, e) in enumerate(ramps):
         if idx < len(heating_steps):
             h_step = heating_steps[idx]
             step_num = h_step['step']
-            cool_step = None
-            anneal_step_1 = None
+            t1_hold_min, t2_hold_min = None, None
             for p in program:
-                if p['step'] == step_num - 1:
-                    pass  # 90→30 cooling
-                elif p['step'] == step_num - 2:
-                    anneal_step_1 = p  # 90→80
+                if p['step'] == step_num - 2:
+                    t2_hold_min = p['time_min']  # 90→80 hold
                 elif p['step'] == step_num - 3:
-                    cool_step = p  # 200→90
-            t1_hold = cool_step['time_min'] if cool_step else None
-            t2_hold = anneal_step_1['time_min'] if anneal_step_1 else None
+                    t1_hold_min = p['time_min']  # 200→90 hold
         else:
-            t1_hold = None
-            t2_hold = None
+            t1_hold_min = t2_hold_min = None
 
         conditions.append({
             'ramp_idx': idx + 1,
-            'T1_hold_s': t1_hold,
-            'T2_hold_s': t2_hold,
-            'start_idx': s,
-            'end_idx': e,
+            'T1_hold_s': t1_hold_min * 60.0 if t1_hold_min else None,
+            'T2_hold_s': t2_hold_min * 60.0 if t2_hold_min else None,
+            'T1_hold_min': t1_hold_min,
+            'T2_hold_min': t2_hold_min,
+            'start_idx': s, 'end_idx': e,
         })
 
-    # Convert to seconds and filter
-    MIN_HOLD = 0.1 * 60  # 6 seconds
-    for c in conditions:
-        c['T1_hold_s'] = c['T1_hold_s'] * 60 if c['T1_hold_s'] else None
-        c['T2_hold_s'] = c['T2_hold_s'] * 60 if c['T2_hold_s'] else None
-    conditions = [c for c in conditions if c['T2_hold_s'] is not None and c['T2_hold_s'] >= MIN_HOLD]
+    conditions = [c for c in conditions
+                  if c['T1_hold_s'] is not None and c['T2_hold_s'] is not None]
     for i, c in enumerate(conditions):
         c['ramp_idx'] = i + 1
+        c['group'] = 'A' if c['T1_hold_s'] < 60 else 'B'
 
+    return conditions
+
+
+def main():
+    print("=" * 70)
+    print("  Two-step annealing DSC — Direct difference method")
+    print("=" * 70)
+
+    exp_data, program = load_dsc_experiment(
+        os.path.join(DATA_DIR, 'twosteps.xlsx'), sheet='PS-02')
+    T_exp = exp_data['Temp'].values
+    DSC_exp = exp_data['DSC'].values
+
+    ramps = detect_heating_ramps(T_exp, exp_data['Time'].values)
+    print(f"  Found {len(ramps)} heating ramps")
+
+    conditions = map_two_step(program, ramps)
+    print(f"  Mapped {len(conditions)} annealed ramps:")
     for c in conditions:
-        print(f"    Ramp {c['ramp_idx']:2d}: T1(90°C)={c['T1_hold_s']:8.1f} s, "
-              f"T2(80°C)={c['T2_hold_s']:8.1f} s")
-    print(f"  Kept {len(conditions)}/{len(ramps)} ramps (T2 >= {MIN_HOLD:.0f} s)")
+        print(f"    Ramp {c['ramp_idx']:2d} [Grp {c['group']}]: "
+              f"T1@90°C={c['T1_hold_s']:8.1f}s, T2@80°C={c['T2_hold_s']:8.1f}s")
 
-    # ── 4. Compute ΔH for each ramp ─────────────────────────────────────
-    print(f"\n[3/4] Computing ΔH ({T_INT_LOW}–{T_INT_HIGH}°C) by direct heat-flow integration...")
+    # Common grid
+    T_grid = np.arange(T_INT_LOW, T_INT_HIGH + T_GRID_STEP, T_GRID_STEP)
 
-    raw_integrals = []
-    dsc_curves = []
-
-    for ramp_idx, cond in enumerate(conditions):
+    # Interpolate all ramps
+    dsc_interp = {}
+    for cond in conditions:
         s, e = cond['start_idx'], cond['end_idx']
-        T_seg = T_exp[s:e+1]
-        DSC_seg = DSC_exp[s:e+1]
-        interp_dsc = interp1d(T_seg, DSC_seg, kind='linear',
-                              bounds_error=False, fill_value='extrapolate')
-        DSC_grid = interp_dsc(T_grid)
-        int_mask = (T_grid >= T_INT_LOW) & (T_grid <= T_INT_HIGH)
-        integral = trapezoid(DSC_grid[int_mask], T_grid[int_mask])  # µW·°C
-        raw_integrals.append(integral)
-        dsc_curves.append(DSC_grid)
-        print(f"    Ramp {ramp_idx+1:2d}: t1={cond['T1_hold_s']:8.1f} s, "
-              f"t2={cond['T2_hold_s']:8.1f} s → "
-              f"raw integral = {integral:.1f} µW·°C")
+        f = interp1d(T_exp[s:e+1], DSC_exp[s:e+1], kind='linear',
+                     bounds_error=False, fill_value='extrapolate')
+        dsc_interp[cond['ramp_idx']] = f(T_grid)
 
-    # Global reference: ramp with shortest total annealing (ramp 1)
-    ref_global = raw_integrals[0]
-    # Offset to make all ΔH positive (add |min difference| + margin)
-    all_diffs = [(r - ref_global) * CONV_KJMOL for r in raw_integrals]
-    offset = max(0, -min(all_diffs)) + 1.0  # ensure all values ≥ 1.0 kJ/mol
-
+    # Per-group processing
     results = []
-    for ramp_idx, cond in enumerate(conditions):
-        integral = raw_integrals[ramp_idx]
-        delta_H_raw = (integral - ref_global) * CONV_KJMOL
-        delta_H_kJmol = delta_H_raw + offset
-        results.append({
-            'ramp': ramp_idx + 1,
-            'T1_hold_s': cond['T1_hold_s'],
-            'T2_hold_s': cond['T2_hold_s'],
-            'delta_H_kJmol': delta_H_kJmol,
-        })
-        print(f"      → ΔH = {delta_H_kJmol:.2f} kJ/mol")
+    colors = {'A': '#2166AC', 'B': '#B2182B'}
+    markers = {'A': 'o', 'B': 's'}
+
+    for grp_label in ['A', 'B']:
+        grp_conds = [c for c in conditions if c['group'] == grp_label]
+        if len(grp_conds) < 2:
+            continue
+
+        ref_cond = min(grp_conds, key=lambda c: c['T2_hold_s'])
+        ref_dsc = dsc_interp[ref_cond['ramp_idx']]
+
+        print(f"\n  [Group {grp_label}] Reference: ramp {ref_cond['ramp_idx']}, "
+              f"T2 hold = {ref_cond['T2_hold_s']:.1f}s")
+
+        for cond in grp_conds:
+            excess = dsc_interp[cond['ramp_idx']] - ref_dsc
+            excess_area = trapezoid(excess, T_grid)
+            delta_H = compute_enthalpy(excess_area)
+            results.append({
+                'ramp': cond['ramp_idx'],
+                'group': cond['group'],
+                'T1_hold_s': cond['T1_hold_s'],
+                'T2_hold_s': cond['T2_hold_s'],
+                'T1_hold_min': cond['T1_hold_min'],
+                'T2_hold_min': cond['T2_hold_min'],
+                'delta_H_kJmol': delta_H,
+                'is_ref': (cond['ramp_idx'] == ref_cond['ramp_idx']),
+            })
+            marker = ' *REF*' if cond['ramp_idx'] == ref_cond['ramp_idx'] else ''
+            print(f"    Ramp {cond['ramp_idx']:2d}: "
+                  f"T1={cond['T1_hold_s']:8.1f}s, T2={cond['T2_hold_s']:8.1f}s → "
+                  f"ΔH={delta_H:+.2f} kJ/mol{marker}")
 
     results_df = pd.DataFrame(results)
-    dsc_curves = np.array(dsc_curves)
 
-    # ── 5. Generate plots ────────────────────────────────────────────────
-    print(f"\n[4/4] Generating plots...")
-
+    # ── Plots ──────────────────────────────────────────────────────────────
     fig = plt.figure(figsize=(20, 14))
 
-    t1_short = results_df[results_df['T1_hold_s'] < 60]
-    t1_long  = results_df[results_df['T1_hold_s'] > 60]
-    colors_grp = ['#2166AC', '#B2182B']
-    markers = ['o', 's']
-
-    # Panel 1: ΔDSC curves
+    # Panel 1: ΔH vs T2 hold time (per group)
     ax1 = fig.add_subplot(2, 3, 1)
-    highlight = [0, 2, 4, 5, 7, 9]
-    labels_h = ['A1','A3','A5','B1','B3','B5']
-    for idx, lbl in zip(highlight, labels_h):
-        c = conditions[idx]
-        ax1.plot(T_grid, dsc_curves[idx], alpha=0.8, linewidth=0.8,
-                 label=f"R{lbl}: t1={c['T1_hold_s']:.3f},t2={c['T2_hold_s']:.3f}")
-    ax1.axvspan(T_INT_LOW, T_INT_HIGH, alpha=0.08, color='green')
-    ax1.set_xlabel('Temperature (°C)')
-    ax1.set_ylabel('ΔDSC (sample − empty) (µW)')
-    ax1.set_title('Baseline-subtracted DSC curves (selected)')
-    ax1.legend(fontsize=6, loc='lower right')
-    ax1.set_xlim(28, T_grid[-1] + 2)
-    ax1.axhline(0, color='gray', linestyle='--', alpha=0.3)
-
-    # Panel 2: All ΔDSC curves by group
-    ax2 = fig.add_subplot(2, 3, 2)
-    t1s_idx = [int(r['ramp'])-1 for _, r in t1_short.iterrows()]
-    t1l_idx = [int(r['ramp'])-1 for _, r in t1_long.iterrows()]
-    for idx in t1s_idx:
-        ax2.plot(T_grid, dsc_curves[idx], alpha=0.4, linewidth=0.5, color=colors_grp[0])
-    for idx in t1l_idx:
-        ax2.plot(T_grid, dsc_curves[idx], alpha=0.4, linewidth=0.5, color=colors_grp[1])
-    ax2.plot(T_grid, dsc_curves[t1s_idx].mean(axis=0), '-', color=colors_grp[0], linewidth=2.0,
-             label=f'T1=50 s (n={len(t1s_idx)})')
-    ax2.plot(T_grid, dsc_curves[t1l_idx].mean(axis=0), '-', color=colors_grp[1], linewidth=2.0,
-             label=f'T1=500 s (n={len(t1l_idx)})')
-    ax2.axvspan(T_INT_LOW, T_INT_HIGH, alpha=0.08, color='green')
-    ax2.set_xlabel('Temperature (°C)')
-    ax2.set_ylabel('ΔDSC (µW)')
-    ax2.set_title('All ΔDSC curves by T1 group')
-    ax2.legend(fontsize=8)
-    ax2.set_xlim(28, T_grid[-1] + 2)
-
-    # Panel 3: ΔH vs T2 annealing time (kJ/mol, positive, increasing)
-    ax3 = fig.add_subplot(2, 3, 3)
-    for i, (grp_label, grp_df) in enumerate([('T1=50 s', t1_short), ('T1=500 s', t1_long)]):
-        ax3.plot(grp_df['T2_hold_s'], grp_df['delta_H_kJmol'],
-                 marker=markers[i], color=colors_grp[i], linewidth=1.8,
+    for grp in ['A', 'B']:
+        rd = results_df[results_df['group'] == grp].sort_values('T2_hold_s')
+        ax1.plot(rd['T2_hold_s'], rd['delta_H_kJmol'],
+                 marker=markers[grp], color=colors[grp], linewidth=1.8,
                  markersize=9, markerfacecolor='white',
-                 markeredgewidth=1.5, label=grp_label)
-    ax3.set_xlabel('T2 hold time at 80°C (s)')
-    ax3.set_ylabel(f'ΔH ({T_INT_LOW}–{T_INT_HIGH}°C) (kJ/mol)')
-    ax3.set_title('Released enthalpy vs T2 annealing time')
-    ax3.set_xscale('log')
-    ax3.invert_yaxis()
-    ax3.legend(fontsize=9)
-    ax3.grid(True, alpha=0.3, which='both')
+                 markeredgewidth=1.5, label=f'Group {grp} (T1@90°C={50 if grp=="A" else 500}s)')
+    ax1.set_xlabel('T2 hold time at 80°C (s)')
+    ax1.set_ylabel('ΔH (kJ/mol)')
+    ax1.set_title('Released enthalpy vs T2 annealing time')
+    ax1.set_xscale('log')
+    ax1.invert_yaxis()
+    ax1.legend(fontsize=8)
+    ax1.grid(True, alpha=0.3, which='both')
+
+    # Panel 2: All DSC curves on common grid
+    ax2 = fig.add_subplot(2, 3, 2)
+    for cond in conditions:
+        ax2.plot(T_grid, dsc_interp[cond['ramp_idx']],
+                 alpha=0.35, linewidth=0.5,
+                 color=colors[cond['group']])
+    ax2.axvspan(T_INT_LOW, T_INT_HIGH, alpha=0.06, color='green')
+    ax2.set_xlabel('Temperature (°C)')
+    ax2.set_ylabel('DSC (µW)')
+    ax2.set_title('All DSC curves by group')
+    ax2.set_xlim(T_INT_LOW - 10, T_INT_HIGH + 10)
+
+    # Panel 3: Excess DSC relative to ref
+    ax3 = fig.add_subplot(2, 3, 3)
+    ref_idxs = {}
+    for grp in ['A', 'B']:
+        gcs = [c for c in conditions if c['group'] == grp]
+        ref_idxs[grp] = min(gcs, key=lambda c: c['T2_hold_s'])['ramp_idx']
+    for cond in conditions:
+        ridx = cond['ramp_idx']
+        ref_idx = ref_idxs[cond['group']]
+        if ridx == ref_idx:
+            continue
+        excess = dsc_interp[ridx] - dsc_interp[ref_idx]
+        ax3.plot(T_grid, excess, alpha=0.45, linewidth=0.6,
+                 color=colors[cond['group']])
+    ax3.axhline(0, color='gray', linestyle=':', alpha=0.4)
+    ax3.set_xlabel('Temperature (°C)')
+    ax3.set_ylabel('Excess DSC (µW)')
+    ax3.set_title('Excess DSC relative to shortest-T2 reference')
+    ax3.set_xlim(T_INT_LOW, T_INT_HIGH)
 
     # Panel 4: ΔH bar chart
     ax4 = fig.add_subplot(2, 3, 4)
-    x_pos = np.arange(len(results_df))
-    bar_colors = [colors_grp[0] if t < 1.0 else colors_grp[1]
-                  for t in results_df['T1_hold_s']]
+    n = len(results_df)
+    x_pos = np.arange(n)
+    bar_colors = [colors[r['group']] for _, r in results_df.iterrows()]
     ax4.bar(x_pos, results_df['delta_H_kJmol'], color=bar_colors,
             edgecolor='black', linewidth=0.5, alpha=0.85)
     ax4.set_xticks(x_pos)
-    ax4.set_xticklabels([f"{r['ramp']:.0f}" for _, r in results_df.iterrows()],
-                        fontsize=7, rotation=45)
-    ax4.set_ylabel(f'ΔH (kJ/mol)')
-    ax4.set_xlabel('Ramp number')
-    ax4.set_title('ΔH (released) distribution across all annealing conditions')
-    mid = len(t1_short) - 0.5
+    ax4.set_xticklabels([f"G{r['group']}\nT2={r['T2_hold_s']:.1f}s"
+                         for _, r in results_df.iterrows()],
+                        fontsize=5.5, rotation=45)
+    ax4.set_ylabel('ΔH (kJ/mol)')
+    ax4.set_title('ΔH distribution')
+    mid = len(results_df[results_df['group'] == 'A']) - 0.5
     ax4.axvline(mid, color='gray', linestyle='--', alpha=0.7)
-    ylim = ax4.get_ylim()
-    ax4.text(mid/2, ylim[1] * 0.98, 'T1=50 s', ha='center', fontsize=9,
-             fontweight='bold', color=colors_grp[0])
-    ax4.text(mid + len(t1_long)/2, ylim[1] * 0.98, 'T1=500 s', ha='center', fontsize=9,
-             fontweight='bold', color=colors_grp[1])
 
-    # Panel 5: Raw DSC curves on sample grid (selected)
+    # Panel 5: DSC curves (selected) on original grid
     ax5 = fig.add_subplot(2, 3, 5)
-    for idx, lbl in zip(highlight, labels_h):
-        c = conditions[idx]
-        s, e = c['start_idx'], c['end_idx']
-        ax5.plot(T_exp[s:e+1], DSC_exp[s:e+1], alpha=0.8, linewidth=0.8,
-                 label=f"R{lbl}: t1={c['T1_hold_s']:.3f},t2={c['T2_hold_s']:.3f}")
+    highlight = [0, 2, 4, 6, 8]
+    for idx in highlight:
+        if idx >= len(conditions):
+            continue
+        cond = conditions[idx]
+        s, e = cond['start_idx'], cond['end_idx']
+        ax5.plot(T_exp[s:e+1], DSC_exp[s:e+1],
+                 alpha=0.7, linewidth=0.7,
+                 color=colors[cond['group']],
+                 label=f"G{cond['group']}: T1={cond['T1_hold_s']:.0f}s, T2={cond['T2_hold_s']:.1f}s")
     ax5.set_xlabel('Temperature (°C)')
-    ax5.set_ylabel('DSC signal (µW)')
+    ax5.set_ylabel('DSC (µW)')
     ax5.set_title('Raw DSC heating curves (selected)')
-    ax5.legend(fontsize=6, loc='lower right')
+    ax5.legend(fontsize=5.5, loc='lower right')
 
-    # Panel 6: Summary table
+    # Panel 6: Table
     ax6 = fig.add_subplot(2, 3, 6)
     ax6.axis('off')
     table_data = []
     for _, r in results_df.iterrows():
         table_data.append([
-            f"{r['ramp']:.0f}",
-            f"{r['T1_hold_s']:.3f}",
-            f"{r['T2_hold_s']:.3f}",
+            f"{r['ramp']:.0f}", r['group'],
+            f"{r['T1_hold_s']:.1f}", f"{r['T2_hold_s']:.1f}",
             f"{r['delta_H_kJmol']:.2f}",
         ])
-    col_labels = ['Ramp', 't1@90°C\n(s)', 't2@80°C\n(s)', 'ΔH\n(kJ/mol)']
-
+    col_labels = ['Ramp', 'Grp', 'T1(s)', 'T2(s)', 'ΔH(kJ/mol)']
     table = ax6.table(cellText=table_data, colLabels=col_labels,
                       cellLoc='center', loc='center',
-                      colWidths=[0.08, 0.18, 0.18, 0.18])
+                      colWidths=[0.08, 0.06, 0.15, 0.15, 0.2])
     table.auto_set_font_size(False)
     table.set_fontsize(7)
-    table.scale(1.0, 1.2)
+    table.scale(1.0, 1.3)
     for row_idx in range(len(table_data)):
-        for col_idx in range(4):
+        for col_idx in range(5):
             cell = table[row_idx + 1, col_idx]
-            if row_idx < 10:
-                cell.set_facecolor('#E3EDF8')
-            else:
-                cell.set_facecolor('#FDE0DD')
-    ax6.set_title('Results Summary', fontsize=12, fontweight='bold', pad=5)
+            cell.set_facecolor('#E3EDF8' if row_idx < 10 else '#FDE0DD')
+    ax6.set_title('Results Summary', fontweight='bold', pad=5)
 
     plt.tight_layout(pad=2)
-    out_png = os.path.join(RESULTS_DIR, 'twosteps_enthalpy_results.png')
-    plt.savefig(out_png, dpi=150, bbox_inches='tight')
-    print(f"  Saved {out_png}")
+    png_path = os.path.join(RESULTS_DIR, 'twosteps_enthalpy_results.png')
+    plt.savefig(png_path, dpi=150, bbox_inches='tight')
+    print(f"\n  Saved {png_path}")
 
-    out_csv = os.path.join(RESULTS_DIR, 'twosteps_enthalpy_results.csv')
-    results_df.to_csv(out_csv, index=False, float_format='%.6f')
-    print(f"  Saved {out_csv}")
+    csv_path = os.path.join(RESULTS_DIR, 'twosteps_enthalpy_results.csv')
+    save_cols = ['ramp', 'group', 'T1_hold_s', 'T2_hold_s',
+                 'T1_hold_min', 'T2_hold_min', 'delta_H_kJmol']
+    results_df[save_cols].to_csv(csv_path, index=False, float_format='%.6f')
+    print(f"  Saved {csv_path}")
 
-    # ── Print summary ─────────────────────────────────────────────────────
+    # Summary
     print("\n" + "=" * 70)
-    print("  RESULTS SUMMARY — Two-step annealing of Polystyrene")
-    print(f"  Method: direct heat-flow integration ({T_INT_LOW}–{T_INT_HIGH}°C), kJ/mol")
-    print(f"  ΔH = released enthalpy relative to shortest T2 anneal in each group")
+    print("  RESULTS SUMMARY — Two-step annealing")
     print("=" * 70)
-    print(f"\n{'Ramp':<6} {'t1@90°C':>10}  {'t2@80°C':>10}  {'ΔH':>10}")
-    print(f"{'':6} {'(s)':>10}  {'(s)':>10}  {'(kJ/mol)':>10}")
-    print("-" * 45)
-    for _, r in results_df.iterrows():
-        print(f"  {r['ramp']:<4.0f}  {r['T1_hold_s']:>10.4f}  {r['T2_hold_s']:>10.4f}  "
-              f"{r['delta_H_kJmol']:>10.2f}")
-    print("-" * 45)
-
-    grp_a = results_df[results_df['T1_hold_s'] < 60]
-    grp_b = results_df[results_df['T1_hold_s'] > 60]
-
-    print(f"\n  Group A (T1@90°C = 50 s):")
-    print(f"    ΔH: {grp_a['delta_H_kJmol'].min():.2f} – {grp_a['delta_H_kJmol'].max():.2f} kJ/mol")
-    print(f"    ΔH mean ± std: {grp_a['delta_H_kJmol'].mean():.2f} ± {grp_a['delta_H_kJmol'].std():.2f} kJ/mol")
-
-    print(f"\n  Group B (T1@90°C = 500 s):")
-    print(f"    ΔH: {grp_b['delta_H_kJmol'].min():.2f} – {grp_b['delta_H_kJmol'].max():.2f} kJ/mol")
-    print(f"    ΔH mean ± std: {grp_b['delta_H_kJmol'].mean():.2f} ± {grp_b['delta_H_kJmol'].std():.2f} kJ/mol")
-
-    a_max = grp_a['delta_H_kJmol'].max()
-    b_max = grp_b['delta_H_kJmol'].max()
-    print(f"\n  Max ΔH Group A: {a_max:.2f} kJ/mol")
-    print(f"  Max ΔH Group B: {b_max:.2f} kJ/mol")
+    for grp in ['A', 'B']:
+        rd = results_df[results_df['group'] == grp]
+        t1_val = rd['T1_hold_s'].iloc[0]
+        print(f"\n  Group {grp} (T1@90°C = {t1_val:.0f}s):")
+        print(f"    ΔH: {rd['delta_H_kJmol'].min():.2f} – "
+              f"{rd['delta_H_kJmol'].max():.2f} kJ/mol, n={len(rd)}")
 
     return results_df
 
