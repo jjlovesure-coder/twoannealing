@@ -9,7 +9,6 @@ region to give the physical aging enthalpy.
 import os
 import numpy as np
 import pandas as pd
-from scipy.interpolate import interp1d
 from scipy.integrate import trapezoid
 import matplotlib
 matplotlib.use('Agg')
@@ -108,8 +107,6 @@ def process_one_step(data_file, sheet, T_anneal, label, out_name):
 
     conditions = map_program_to_ramps(program, ramps)
     print(f"  Mapped {len(conditions)} annealed ramps per run")
-
-    T_grid = np.arange(T_INT_LOW, T_INT_HIGH_FIXED + 20 + T_GRID_STEP, T_GRID_STEP)
 
     # Process each ramp
     results = []
