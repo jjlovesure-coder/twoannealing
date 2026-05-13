@@ -94,7 +94,14 @@ def load_empty_crucible(csv_path):
     T = df['Temp/Cel'].values.astype(float)
     DSC = df['DSC/uW'].values.astype(float)
     mask = T >= 30.0
-    return T[mask], DSC[mask]
+    T, DSC = T[mask], DSC[mask]
+    if not np.all(np.diff(T) > 0):
+        raise ValueError(
+            f"Empty crucible T is not strictly increasing. "
+            f"CSV may contain non-heating segments. "
+            f"T range: {T.min():.1f}-{T.max():.1f}°C, len={len(T)}"
+        )
+    return T, DSC
 
 
 def subtract_empty_crucible(T_sample, DSC_sample, T_empty, DSC_empty):
@@ -129,7 +136,7 @@ def detect_t_onset(T, DSC_corrected, post_Tg_range=(120, 150)):
     noise_std = np.std(residuals)
     threshold = 3.0 * max(noise_std, 0.01)
 
-    scan_mask = (T >= 80) & (T <= 150)
+    scan_mask = (T >= 80) & (T <= post_Tg_range[1])
     scan_idx = np.where(scan_mask)[0]
     if len(scan_idx) == 0:
         return 100.0
