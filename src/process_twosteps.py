@@ -27,8 +27,6 @@ RESULTS_DIR = os.path.join(ROOT_DIR, 'results', 'dsc')
 
 T_INT_LOW = 30
 T_INT_HIGH_FIXED = 100
-T_GRID_STEP = 0.2
-
 EMPTY_CRUCIBLE_CSV = os.path.join(DATA_DIR, 'csv', 'baseline-01.csv')
 
 
@@ -131,6 +129,8 @@ def main():
             'T_onset': T_onset,
             'delta_H_dyn_kJmol': dH1,
             'delta_H_fixed_kJmol': dH2,
+            '_T_ramp': T_ramp,
+            '_DSC_corr': DSC_corr,
         })
         print(f"    Ramp {cond['ramp_idx']:2d}: T1={cond['T1_hold_s']:8.1f}s, "
               f"T2={cond['T2_hold_s']:8.1f}s, T_onset={T_onset:.1f}°C → "
@@ -165,13 +165,9 @@ def main():
 
     # Panel 2: Corrected DSC curves
     ax2 = fig.add_subplot(2, 3, 2)
-    for cond in conditions:
-        s, e = cond['start_idx'], cond['end_idx']
-        T_ramp = T_exp[s:e+1]
-        DSC_ramp = DSC_exp[s:e+1]
-        DSC_corr = subtract_empty_crucible(T_ramp, DSC_ramp, T_empty, DSC_empty)
-        ax2.plot(T_ramp, DSC_corr, alpha=0.35, linewidth=0.5,
-                 color=colors[cond['group']])
+    for r in results:
+        ax2.plot(r['_T_ramp'], r['_DSC_corr'], alpha=0.35, linewidth=0.5,
+                 color=colors[r['group']])
     ax2.axvline(T_INT_HIGH_FIXED, color='green', linestyle='--', alpha=0.5,
                 label=f'Fixed: {T_INT_HIGH_FIXED}°C')
     ax2.set_xlabel('Temperature (°C)')
@@ -262,9 +258,9 @@ def main():
             cell.set_facecolor('#E3EDF8' if row_idx < 10 else '#FDE0DD')
     ax6.set_title('Results Summary', fontweight='bold', pad=5)
 
-    plt.tight_layout(pad=2)
     fig.suptitle('Two-Step Annealing: Empty-Crucible Subtracted Direct Integration',
                  fontsize=12, fontweight='bold', y=1.01)
+    plt.tight_layout(pad=2)
     png_path = os.path.join(RESULTS_DIR, 'twosteps_enthalpy_results.png')
     plt.savefig(png_path, dpi=150, bbox_inches='tight')
     plt.close()
