@@ -163,7 +163,7 @@ def process_onestep(data_file, sheet, T_anneal, label):
     integrals = np.array(all_integrals)
     ref = integrals[0]
     delta_H = (integrals - ref) * CONV_KJMOL
-    offset = max(0, -delta_H.min()) + 1.0
+    offset = max(0, -delta_H.min())
     dH = delta_H + offset
 
     # Determine cooling group (50s vs 500s) from program pattern
@@ -256,7 +256,7 @@ def process_twosteps(data_file, sheet, label):
     integrals = np.array(all_integrals)
     ref = integrals[0]
     delta_H = (integrals - ref) * CONV_KJMOL
-    offset = max(0, -delta_H.min()) + 1.0
+    offset = max(0, -delta_H.min())
     dH = delta_H + offset
 
     # Determine T1 group (50s vs 500s)
@@ -360,7 +360,7 @@ def process_kovacs(data_file, sheet, label):
     integrals = np.array(all_integrals)
     ref = integrals[0]
     delta_H = (integrals - ref) * CONV_KJMOL
-    offset = max(0, -delta_H.min()) + 1.0
+    offset = max(0, -delta_H.min())
     dH = delta_H + offset
 
     n = len(conditions)
