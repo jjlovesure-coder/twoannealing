@@ -166,7 +166,7 @@ def run_stage1(targets, seed=None):
 
     best_result = None
     best_cost = np.inf
-    n_starts = 80
+    n_starts = 30
 
     print(f"  Stage 1: Multi-start L-BFGS-B ({n_starts} starts, 5 params)...")
     for k in range(n_starts):

@@ -82,7 +82,7 @@ class TNMModel:
             return T_f_init, xi_init, T_hist, xi_hist
 
         duration = dT_total / rate
-        n_steps = max(10, int(np.ceil(dT_total / 2.0)))
+        n_steps = max(8, int(np.ceil(dT_total / 5.0)))
         T_vals = np.linspace(T_start, T_end, n_steps + 1)[1:]
 
         T_hist = np.zeros(n_steps + 1)
@@ -123,10 +123,10 @@ class TNMModel:
             return T_f_start, xi_init, T_f_start, T_hist, xi_hist
 
         if t_hold < 1.0:
-            n_steps = max(3, min(30, int(t_hold / 0.005) + 3))
+            n_steps = max(3, min(20, int(t_hold / 0.01) + 2))
             t_steps = np.linspace(0, t_hold, n_steps + 1)[1:]
         else:
-            n_steps = max(8, min(50, int(np.log10(t_hold) * 20 + 10)))
+            n_steps = max(5, min(30, int(np.log10(t_hold) * 15 + 5)))
             t_start_log = max(0.02, t_hold / 200)
             t_steps = np.logspace(np.log10(t_start_log),
                                   np.log10(t_hold), n_steps)
