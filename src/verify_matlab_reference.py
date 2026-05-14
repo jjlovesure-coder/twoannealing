@@ -183,7 +183,7 @@ def main():
 
     if all_pass:
         print("\n" + "=" * 60)
-        print("  VERIFICATION PASSED — Model matches MATLAB reference")
+        print("  VERIFICATION PASSED — All physical checks passed")
         print("=" * 60)
         return 0
     else:
