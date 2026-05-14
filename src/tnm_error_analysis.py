@@ -57,11 +57,8 @@ def residual_analysis(model, targets, sim_data_kJ):
         'kvA': 'Kovacs Grp A', 'kvB': 'Kovacs Grp B',
     }
 
-    print(f"    sim_data_kJ keys: {list(sim_data_kJ.keys())}")
     all_residuals = []
     for idx, (sim_key, (exp_key, grp_key)) in enumerate(group_map.items()):
-        print(f"    Checking {sim_key}: exp={exp_key}, grp={grp_key}, "
-              f"mask_sum={targets[exp_key]['groups'] == grp_key if exp_key in targets else 'N/A'}")
         ax = axes.flat[idx]
         exp = targets[exp_key]
         mask = exp['groups'] == grp_key

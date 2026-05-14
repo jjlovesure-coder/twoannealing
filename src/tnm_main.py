@@ -72,7 +72,7 @@ def compute_sim_kJ_data(model, targets):
 
         dh_sim_norm_interp = np.interp(t_exp, HOLD_TIMES_SEC, dh_sim_norm)
 
-        a, b = np.polyfit(dh_sim_norm_interp, dh_exp, 1)
+        a, b = np.polyfit(dh_sim_norm_interp, dh_exp, 1) if np.std(dh_sim_norm_interp) > 1e-8 else (0, np.mean(dh_exp))
         scaling[sim_key] = (a, b)
         sim_data_kJ[sim_key] = a * dh_sim_norm_interp + b
 

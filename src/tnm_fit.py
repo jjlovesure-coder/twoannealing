@@ -135,11 +135,19 @@ def stage2_cost_absolute(packed, targets):
         if np.std(dh_sim_raw) < 1e-8:
             return 1e8
 
-        # Scale sim norm to exp kJ via linear fit
-        try:
-            a, b = np.polyfit(dh_sim_norm, dh_exp_kJ, 1)
-        except Exception:
+        # Robust linear scaling: sim_norm -> exp kJ
+        # Use explicit least-squares with fallback
+        if np.std(dh_sim_norm) < 1e-6:
             return 1e8
+        A_mat = np.column_stack([dh_sim_norm, np.ones_like(dh_sim_norm)])
+        try:
+            coeffs, _, _, _ = np.linalg.lstsq(A_mat, dh_exp_kJ, rcond=None)
+        except Exception:
+            # Fallback: simple range scaling
+            a = (dh_exp_kJ[-1] - dh_exp_kJ[0]) / (dh_sim_norm[-1] - dh_sim_norm[0] + 1e-15)
+            b = dh_exp_kJ[0] - a * dh_sim_norm[0]
+        else:
+            a, b = coeffs[0], coeffs[1]
         dh_sim_kJ = a * dh_sim_norm + b
         chi2 += np.sum((dh_sim_kJ - dh_exp_kJ) ** 2)
         n_pts += len(dh_exp_kJ)
