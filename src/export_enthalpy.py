@@ -20,8 +20,7 @@ HEATING_RATE = 10.0
 BETA = HEATING_RATE / 60.0
 DT_DT = 1.0 / BETA
 CONV_FACTOR = DT_DT / (M_SAMPLE * 1000)
-MW = 280000
-CONV_KJMOL = CONV_FACTOR * MW / 1000
+CONV_JG = CONV_FACTOR  # µW·°C → J/g
 T_INT_LOW = 30
 
 
@@ -162,7 +161,7 @@ def process_onestep(data_file, sheet, T_anneal, label):
             all_integrals.append(np.nan)
 
     integrals = np.array(all_integrals)
-    dH = -integrals * CONV_KJMOL
+    dH = -integrals * CONV_JG
 
     # Determine cooling group (50s vs 500s) from program pattern
     n = len(conditions)
@@ -180,7 +179,7 @@ def process_onestep(data_file, sheet, T_anneal, label):
             'hold_s': cond['hold_s'],
             'cooling_group': cooling_groups[i],
             'T_onset_C': T_onsets[i],
-            'delta_H_kJ_per_mol': dH[i],
+            'delta_H_J_per_g': dH[i],
         })
 
     return pd.DataFrame(results)
@@ -252,7 +251,7 @@ def process_twosteps(data_file, sheet, label):
             all_integrals.append(np.nan)
 
     integrals = np.array(all_integrals)
-    dH = -integrals * CONV_KJMOL
+    dH = -integrals * CONV_JG
 
     # Determine T1 group (50s vs 500s)
     n = len(conditions)
@@ -273,7 +272,7 @@ def process_twosteps(data_file, sheet, label):
             'heating_rate_K_per_min': HEATING_RATE,
             'T1_group': T1_groups[i],
             'T_onset_C': T_onsets[i],
-            'delta_H_kJ_per_mol': dH[i],
+            'delta_H_J_per_g': dH[i],
         })
 
     return pd.DataFrame(results)
@@ -353,7 +352,7 @@ def process_kovacs(data_file, sheet, label):
             all_integrals.append(np.nan)
 
     integrals = np.array(all_integrals)
-    dH = -integrals * CONV_KJMOL
+    dH = -integrals * CONV_JG
 
     n = len(conditions)
     midpoint = n // 2
@@ -374,7 +373,7 @@ def process_kovacs(data_file, sheet, label):
             'heating_rate_K_per_min': HEATING_RATE,
             'T1_group': T1_groups[i],
             'T_onset_C': T_onsets[i],
-            'delta_H_kJ_per_mol': dH[i],
+            'delta_H_J_per_g': dH[i],
             'overshoot_peak_uW': overshoot_peaks[i],
         })
 
@@ -436,6 +435,73 @@ def main():
     print(f"\n{'=' * 70}")
     print(f"  All enthalpy data exported to {RESULTS_DIR}/")
     print(f"{'=' * 70}")
+
+    # ── Generate plots ──
+    print(f"\n[5/5] Generating result plots...")
+    plot_all_results(df_os_50, df_os_70, df_ts, df_kov)
+
+
+def plot_all_results(df_os_50, df_os_70, df_ts, df_kov):
+    """Generate 2x2 comparison plot for all experiments."""
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+
+    fig, axes = plt.subplots(2, 2, figsize=(14, 12))
+    colors = {'50s': '#2166AC', '500s': '#B2182B'}
+    markers = {'50s': 'o', '500s': 's'}
+
+    def plot_one(ax, df, title, x_col, xlabel):
+        for grp in ['50s', '500s']:
+            g = df[df['cooling_group'] == grp] if 'cooling_group' in df.columns else df[df['T1_group'] == grp]
+            if len(g) == 0:
+                g1 = df[df['T1_group'] == grp] if 'T1_group' in df.columns else pd.DataFrame()
+                g2 = df[df['cooling_group'] == grp] if 'cooling_group' in df.columns else pd.DataFrame()
+                g = g1 if len(g1) > 0 else g2
+            if len(g) > 0:
+                ax.plot(g[x_col], g['delta_H_J_per_g'], marker=markers.get(grp, 'o'),
+                        color=colors.get(grp, 'gray'), linewidth=1.5, markersize=7,
+                        markerfacecolor='white', markeredgewidth=1.5, label=grp)
+        ax.set_xlabel(xlabel)
+        ax.set_ylabel('ΔH (J/g)')
+        ax.set_title(title)
+        ax.set_xscale('log')
+        ax.legend(fontsize=9)
+        ax.grid(True, alpha=0.3, which='both')
+
+    # Panel 1: One-step 50°C
+    plot_one(axes[0, 0], df_os_50, 'One-step annealing @50°C', 'hold_s',
+             'Hold time at 50°C (s)')
+
+    # Panel 2: One-step 70°C
+    plot_one(axes[0, 1], df_os_70, 'One-step annealing @70°C', 'hold_s',
+             'Hold time at 70°C (s)')
+
+    # Panel 3: Two-step
+    plot_one(axes[1, 0], df_ts, 'Two-step annealing (90→80°C)', 'T2_hold_s',
+             'T2 hold time at 80°C (s)')
+
+    # Panel 4: Kovacs
+    ax4 = axes[1, 1]
+    for grp in ['50s', '500s']:
+        g = df_kov[df_kov['T1_group'] == grp]
+        if len(g) > 0:
+            ax4.plot(g['T2_hold_s'], g['delta_H_J_per_g'],
+                     marker=markers.get(grp, 'o'), color=colors.get(grp, 'gray'),
+                     linewidth=1.5, markersize=7, markerfacecolor='white',
+                     markeredgewidth=1.5, label=grp)
+    ax4.set_xlabel('T2 hold time at 90°C (s)')
+    ax4.set_ylabel('ΔH (J/g)')
+    ax4.set_title('Kovacs up-jump (80→90°C)')
+    ax4.set_xscale('log')
+    ax4.legend(fontsize=9)
+    ax4.grid(True, alpha=0.3, which='both')
+
+    plt.tight_layout()
+    png_path = os.path.join(RESULTS_DIR, 'enthalpy_all_results.png')
+    plt.savefig(png_path, dpi=150, bbox_inches='tight')
+    print(f"  Saved {png_path}")
+    plt.close()
 
 
 if __name__ == '__main__':
