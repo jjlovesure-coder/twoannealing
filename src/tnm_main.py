@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-TNM Model Driver — Shape-based staged fitting and comprehensive analysis.
+TNM Model Driver — Corrected model + 2-stage fitting + Kovacs prediction.
 
-Fit strategy: normalize both simulated and experimental delta_H to [0,1],
-then minimize the squared error in normalized space. This focuses on
-the curve SHAPE regardless of absolute scale.
+Fit strategy:
+  Stage 1: Shape-fit one-step (normalized [0,1]) -> rough x, beta.
+  Stage 2: Absolute-scale fit (kJ/mol) with one-step + two-step -> refine all.
+  Stage 3: Kovacs prediction (no fitting, hold-out validation).
 """
 
 import os
@@ -19,11 +20,11 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from tnm_model import TNMModel
 from tnm_conditions import (
     HOLD_TIMES_SEC, T_50C, T_70C, T_80C, T_90C, T_INITIAL,
-    COOLING_RATE, load_experimental_data, build_target_vectors,
+    COOLING_RATE, build_target_vectors, T1_HOLD_SHORT, T1_HOLD_LONG,
 )
 from tnm_fit import (
     make_model, run_stage1, run_stage2, compute_r_squared,
-    simulate_protocol_dh,
+    simulate_protocol_match_exp, simulate_protocol_raw,
 )
 from tnm_plots import (
     plot_one_step_fit, plot_two_step_fit, plot_kovacs_prediction,
@@ -32,112 +33,93 @@ from tnm_plots import (
 
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RESULTS_DIR = os.path.join(ROOT_DIR, 'results', 'tnm')
+os.makedirs(RESULTS_DIR, exist_ok=True)
 
 
-def make_scaled_sim_data(model, targets):
-    """Compute simulated delta_H for all 6 protocol groups.
-
-    Returns normalized [0,1] values plus fitted scaling to kJ/mol.
-    """
-    sim_data_norm = {}
+def compute_sim_kJ_data(model, targets):
+    """Compute simulated delta_H in kJ/mol for all 6 protocol groups."""
     sim_data_kJ = {}
     scaling = {}
 
-    for key in ['os50', 'os70', 'tsA', 'tsB', 'kvA', 'kvB']:
-        dh_sim_norm, dh_exp_norm = simulate_protocol_dh(model, key, targets)
-        if dh_sim_norm is not None:
-            sim_data_norm[key] = dh_sim_norm
-
-    # Fit scaling to kJ/mol for each protocol
-    # Group mapping for each protocol
-    proto_groups = {
-        ('os50', 'os50'): ('os50', 'run1'),
-        ('os70', 'os70'): ('os70', 'run1'),
-        ('ts_grpA', 'tsA'): ('ts', 'ts_grpA'),
-        ('ts_grpB', 'tsB'): ('ts', 'ts_grpB'),
-        ('kov_grpA', 'kvA'): ('kovacs', 'kov_grpA'),
-        ('kov_grpB', 'kvB'): ('kovacs', 'kov_grpB'),
+    group_map = {
+        'os50': ('os50', 'run1'),
+        'os70': ('os70', 'run1'),
+        'tsA': ('ts', 'grpA'),
+        'tsB': ('ts', 'grpB'),
+        'kvA': ('kovacs', 'grpA'),
+        'kvB': ('kovacs', 'grpB'),
     }
 
-    for (proto_name, sim_key), (exp_key, grp_key) in proto_groups.items():
+    for sim_key, (exp_key, grp_key) in group_map.items():
+        _, dh_sim_raw = simulate_protocol_raw(model, sim_key)
+
         exp = targets[exp_key]
-        if exp_key in ('os50', 'os70'):
-            dh_e = exp['dH']
-            t_e = exp['t']
+        mask = exp['groups'] == grp_key
+        dh_exp = exp['dH'][mask]
+        t_exp = exp['t'][mask]
+
+        s_min, s_max = dh_sim_raw.min(), dh_sim_raw.max()
+        if s_max - s_min < 1e-10:
+            dh_sim_norm = np.zeros_like(dh_sim_raw)
         else:
-            mask = exp['groups'] == grp_key
-            dh_e = exp['dH'][mask]
-            t_e = exp['t'][mask]
+            dh_sim_norm = (dh_sim_raw - s_min) / (s_max - s_min)
 
-        if sim_key in sim_data_norm:
-            dh_s = sim_data_norm[sim_key]
-            n_sim_raw = 10  # sim has 10 unique hold times
-            if len(dh_s) == n_sim_raw:
-                # Sim is 10 raw values; interp to match exp
-                dh_s_interp = np.interp(t_e, HOLD_TIMES_SEC, dh_s)
-            else:
-                dh_s_interp = dh_s
-            a, b = np.polyfit(dh_s_interp, dh_e, 1)
-            scaling[sim_key] = (a, b)
-            sim_data_kJ[sim_key] = a * dh_s_interp + b
+        e_min, e_max = dh_exp.min(), dh_exp.max()
+        if e_max - e_min < 1e-10:
+            dh_exp_norm = np.zeros_like(dh_exp)
+        else:
+            dh_exp_norm = (dh_exp - e_min) / (e_max - e_min)
 
-    return sim_data_norm, sim_data_kJ, scaling
+        dh_sim_norm_interp = np.interp(t_exp, HOLD_TIMES_SEC, dh_sim_norm)
+
+        a, b = np.polyfit(dh_sim_norm_interp, dh_exp, 1)
+        scaling[sim_key] = (a, b)
+        sim_data_kJ[sim_key] = a * dh_sim_norm_interp + b
+
+    return sim_data_kJ, scaling
 
 
 def compute_all_r2(sim_data_kJ, targets):
     """Compute R^2 for each group using kJ/mol values."""
     r2_values = {}
     group_map = {
-        'os50': ('os50', 'os50'), 'os70': ('os70', 'os70'),
-        'ts_grpA': ('ts', 'ts_grpA'), 'ts_grpB': ('ts', 'ts_grpB'),
-        'kov_grpA': ('kovacs', 'kov_grpA'), 'kov_grpB': ('kovacs', 'kov_grpB'),
+        'os50': ('os50', 'run1'),
+        'os70': ('os70', 'run1'),
+        'tsA': ('ts', 'grpA'),
+        'tsB': ('ts', 'grpB'),
+        'kvA': ('kovacs', 'grpA'),
+        'kvB': ('kovacs', 'grpB'),
     }
-    for proto_name, (exp_key, grp_key) in group_map.items():
+    for sim_key, (exp_key, grp_key) in group_map.items():
         exp = targets[exp_key]
-        if exp_key in ('os50', 'os70'):
-            dh_e = exp['dH']
-            t_e = exp['t']
+        mask = exp['groups'] == grp_key
+        dh_exp = exp['dH'][mask]
+        if sim_key in sim_data_kJ:
+            dh_sim = sim_data_kJ[sim_key]
+            r2_values[sim_key] = compute_r_squared(dh_sim, dh_exp)
         else:
-            mask = exp['groups'] == grp_key
-            dh_e = exp['dH'][mask]
-            t_e = exp['t'][mask]
-
-        sim_key = proto_name.replace('_grpA', 'A').replace('_grpB', 'B').replace('os', 'os')
-        # Fix: map proto_name to correct sim_data_kJ key
-        sim_key_map = {
-            'os50': 'os50', 'os70': 'os70',
-            'ts_grpA': 'tsA', 'ts_grpB': 'tsB',
-            'kov_grpA': 'kvA', 'kov_grpB': 'kvB',
-        }
-        sk = sim_key_map[proto_name]
-        if sk in sim_data_kJ:
-            dh_s = sim_data_kJ[sk]
-            r2_values[proto_name] = compute_r_squared(dh_s, dh_e)
-        else:
-            r2_values[proto_name] = np.nan
+            r2_values[sim_key] = np.nan
     return r2_values
 
 
 def main():
     print("=" * 70)
-    print("  TNM Model — Shape-Based Fitting to PS Annealing Data")
+    print("  TNM Model — Corrected Fitting to PS Annealing Data")
     print("=" * 70)
-
-    T0 = 393.15  # 120 C, equilibrium reference for PS
 
     # Load targets
     print("\n[1] Loading experimental data...")
     targets = build_target_vectors()
-    print(f"  Loaded: os50={len(targets['os50']['dH'])}pts, "
-          f"os70={len(targets['os70']['dH'])}pts, "
-          f"ts={len(targets['ts']['dH'])}pts, "
-          f"kovacs={len(targets['kovacs']['dH'])}pts")
+    for key, d in targets.items():
+        print(f"  {key}: {len(d['t'])} pts, "
+              f"dH range=[{d['dH'].min():.1f}, {d['dH'].max():.1f}] kJ/mol")
 
     # Stage 1: Shape-fit one-step
     print("\n[2] Stage 1: Shape-fitting one-step (50C + 70C)...")
-    s1_params, s1_result = run_stage1(targets, T0, seed=42)
-    model_s1 = make_model(**s1_params, T0=T0)
-    sim_norm_s1, sim_kJ_s1, scaling_s1 = make_scaled_sim_data(model_s1, targets)
+    s1_params, s1_result = run_stage1(targets, seed=42)
+    model_s1 = make_model(**s1_params)
+
+    sim_kJ_s1, scaling_s1 = compute_sim_kJ_data(model_s1, targets)
     r2_s1 = compute_all_r2(sim_kJ_s1, targets)
 
     print(f"\n  Stage 1 results:")
@@ -146,16 +128,19 @@ def main():
     print(f"    H*       = {s1_params['H_star']/1000:.1f} kJ/mol")
     print(f"    x        = {s1_params['x']:.4f}")
     print(f"    beta     = {s1_params['beta']:.4f}")
+    print(f"    T0       = {s1_params['T0']:.1f} K ({s1_params['T0']-273.15:.1f} C)")
     print(f"    Cost     = {s1_result.fun:.6f}")
-    for k, v in r2_s1.items():
+    for k in ['os50', 'os70', 'tsA', 'tsB', 'kvA', 'kvB']:
+        v = r2_s1.get(k, np.nan)
         if not np.isnan(v):
-            print(f"    R^2 {k:12s} = {v:.4f}")
+            print(f"    R^2 {k:6s} = {v:.4f}")
 
-    # Stage 2: Add two-step
-    print("\n[3] Stage 2: Refining with two-step shape...")
-    s2_params, s2_result = run_stage2(targets, T0, s1_params, seed=42)
-    model_s2 = make_model(**s2_params, T0=T0)
-    sim_norm_s2, sim_kJ_s2, scaling_s2 = make_scaled_sim_data(model_s2, targets)
+    # Stage 2: Absolute-scale fit
+    print("\n[3] Stage 2: Absolute-scale refinement (all protocols)...")
+    s2_params, s2_result = run_stage2(targets, s1_params, seed=42)
+    model_s2 = make_model(**s2_params)
+
+    sim_kJ_s2, scaling_s2 = compute_sim_kJ_data(model_s2, targets)
     r2_s2 = compute_all_r2(sim_kJ_s2, targets)
 
     print(f"\n  Stage 2 results:")
@@ -164,23 +149,25 @@ def main():
     print(f"    H*       = {s2_params['H_star']/1000:.1f} kJ/mol")
     print(f"    x        = {s2_params['x']:.4f}")
     print(f"    beta     = {s2_params['beta']:.4f}")
+    print(f"    T0       = {s2_params['T0']:.1f} K ({s2_params['T0']-273.15:.1f} C)")
     print(f"    Cost     = {s2_result.fun:.6f}")
-    for k, v in r2_s2.items():
+    for k in ['os50', 'os70', 'tsA', 'tsB', 'kvA', 'kvB']:
+        v = r2_s2.get(k, np.nan)
         if not np.isnan(v):
-            print(f"    R^2 {k:12s} = {v:.4f}")
+            print(f"    R^2 {k:6s} = {v:.4f}")
 
     # Stage 3: Kovacs prediction
-    print("\n[4] Stage 3: Kovacs prediction (no fitting)...")
-    r2_kv = {k: v for k, v in r2_s2.items() if k.startswith('kov')}
-    for k, v in r2_kv.items():
-        print(f"    R^2 {k:12s} = {v:.4f}")
+    print("\n[4] Stage 3: Kovacs prediction (hold-out validation)...")
+    for k in ['kvA', 'kvB']:
+        v = r2_s2.get(k, np.nan)
+        print(f"    R^2 {k:6s} = {v:.4f}")
 
     # Save results
     print("\n[5] Saving fit results...")
     results_rows = []
     for stage_name, params, r2_dict in [
-        ('Stage1_OneStep', s1_params, r2_s1),
-        ('Stage2_TwoStep', s2_params, r2_s2),
+        ('Stage1_Shape', s1_params, r2_s1),
+        ('Stage2_Absolute', s2_params, r2_s2),
     ]:
         row = {
             'stage': stage_name,
@@ -189,8 +176,11 @@ def main():
             'H_star_kJmol': params['H_star'] / 1000.0,
             'x': params['x'],
             'beta': params['beta'],
-            **{f'R2_{k}': v for k, v in r2_dict.items()},
+            'T0_K': params['T0'],
+            'T0_C': params['T0'] - 273.15,
         }
+        for k, v in r2_dict.items():
+            row[f'R2_{k}'] = v
         results_rows.append(row)
 
     results_df = pd.DataFrame(results_rows)
@@ -198,13 +188,13 @@ def main():
     results_df.to_csv(csv_path, index=False, float_format='%.6f')
     print(f"  Saved {csv_path}")
 
+    # Display final summary
     print("\n  " + "=" * 80)
     for _, row in results_df.iterrows():
         print(f"  {row['stage']}:")
-        print(f"    log10(A/s) = {row['log10_A']:.3f}, "
-              f"A = {row['A_s']:.2e} s")
-        print(f"    H* = {row['H_star_kJmol']:.1f} kJ/mol, "
-              f"x = {row['x']:.4f}, beta = {row['beta']:.4f}")
+        print(f"    log10(A/s) = {row['log10_A']:.3f}, A = {row['A_s']:.2e} s")
+        print(f"    H* = {row['H_star_kJmol']:.1f} kJ/mol, x = {row['x']:.4f}, "
+              f"beta = {row['beta']:.4f}, T0 = {row['T0_K']:.1f} K")
         for k, v in row.items():
             if k.startswith('R2_') and not (isinstance(v, float) and np.isnan(v)):
                 print(f"    {k}: {v:.4f}")
@@ -212,14 +202,7 @@ def main():
 
     # Generate plots
     print("\n[6] Generating plots...")
-    # Build sim_data dict for plot functions
-    sim_for_plot = {}
-    for proto_name in ['os50', 'os70', 'ts_grpA', 'ts_grpB',
-                        'kov_grpA', 'kov_grpB']:
-        if proto_name in sim_kJ_s2:
-            sim_for_plot[proto_name] = sim_kJ_s2[proto_name]
-        else:
-            sim_for_plot[proto_name] = np.zeros(10)
+    sim_for_plot = {k: sim_kJ_s2[k] for k in sim_kJ_s2}
 
     plot_one_step_fit(
         targets, sim_for_plot, s2_params,
@@ -252,7 +235,8 @@ def main():
     print("=" * 70)
     print(f"  Final: logA={s2_params['logA']:.3f}, "
           f"H*={s2_params['H_star']/1000:.1f} kJ/mol, "
-          f"x={s2_params['x']:.4f}, beta={s2_params['beta']:.4f}")
+          f"x={s2_params['x']:.4f}, beta={s2_params['beta']:.4f}, "
+          f"T0={s2_params['T0']:.1f} K")
     print(f"  Outputs in: {RESULTS_DIR}/")
     print("=" * 70)
 
