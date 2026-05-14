@@ -21,23 +21,32 @@ ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RESULTS_DIR = os.path.join(ROOT_DIR, 'results', 'tnm')
 os.makedirs(RESULTS_DIR, exist_ok=True)
 
-# Load fitted params
+# Load fitted params from both stages
 csv_path = os.path.join(RESULTS_DIR, 'tnm_fit_results.csv')
 df = pd.read_csv(csv_path)
-s2 = df[df['stage'] == 'Stage2_Absolute'].iloc[0]
-params = {
-    'logA': s2['log10_A'], 'H_star': s2['H_star_kJmol'] * 1000,
-    'x': s2['x'], 'beta': s2['beta'], 'T0': s2['T0_K'],
-}
+s1_row = df[df['stage'] == 'Stage1_Shape'].iloc[0]
+s2_row = df[df['stage'] == 'Stage2_Absolute'].iloc[0]
 
-model = TNMModel(A=10**params['logA'], H_star=params['H_star'],
-                 x=params['x'], beta=params['beta'], T0=params['T0'])
+def row_to_params(row):
+    return dict(logA=row['log10_A'], H_star=row['H_star_kJmol'] * 1000,
+                x=row['x'], beta=row['beta'], T0=row['T0_K'])
 
-print(f"Parameters: logA={params['logA']:.3f}, H*={params['H_star']/1000:.1f} kJ/mol, "
-      f"x={params['x']:.4f}, beta={params['beta']:.4f}, T0={params['T0']:.1f}K")
+s1_params = row_to_params(s1_row)
+s2_params = row_to_params(s2_row)
+params = s2_params  # Use Stage 2 by default for main prediction
 
-# Extended time range: 0.1s to 10^7s
-t_ext = np.logspace(-1, 7, 200)
+model = TNMModel(A=10**s2_params['logA'], H_star=s2_params['H_star'],
+                 x=s2_params['x'], beta=s2_params['beta'], T0=s2_params['T0'])
+model_s1 = TNMModel(A=10**s1_params['logA'], H_star=s1_params['H_star'],
+                     x=s1_params['x'], beta=s1_params['beta'], T0=s1_params['T0'])
+
+print(f"Stage 1: logA={s1_params['logA']:.3f}, H*={s1_params['H_star']/1000:.1f} kJ/mol, "
+      f"x={s1_params['x']:.4f}, beta={s1_params['beta']:.4f}, T0={s1_params['T0']:.1f}K")
+print(f"Stage 2: logA={s2_params['logA']:.3f}, H*={s2_params['H_star']/1000:.1f} kJ/mol, "
+      f"x={s2_params['x']:.4f}, beta={s2_params['beta']:.4f}, T0={s2_params['T0']:.1f}K")
+
+# Extended time range: 0.01s to 10^8s (~3 years)
+t_ext = np.logspace(-2, 8, 300)
 targets = build_target_vectors()
 
 # ---- Plot 1: One-step ----
@@ -183,18 +192,39 @@ print(f"Saved: {out_path}")
 # ---- Convergence analysis ----
 print("\n=== Plateau Convergence Analysis ===")
 print("Checking if Grp A and Grp B converge at long T2 times...")
+print()
 
-for name, T1, T2, t1_s, t1_l in [
-    ('Two-step hi→lo', T_90C, T_80C, T1_HOLD_SHORT, T1_HOLD_LONG),
-    ('Kovacs up-jump', T_80C, T_90C, T1_HOLD_SHORT, T1_HOLD_LONG),
-]:
-    dh_A_inf = model.delta_H_two_step(T1, t1_s, T2, 1e7)
-    dh_B_inf = model.delta_H_two_step(T1, t1_l, T2, 1e7)
-    dh_A_exp = model.delta_H_two_step(T1, t1_s, T2, 1000)
-    dh_B_exp = model.delta_H_two_step(T1, t1_l, T2, 1000)
-    print(f"\n{name} (T1={T1-273:.0f}C -> T2={T2-273:.0f}C):")
-    print(f"  Grp A: dH(t2=1000s)={dh_A_exp:.4f}, dH(t2=1e7s)={dh_A_inf:.4f}")
-    print(f"  Grp B: dH(t2=1000s)={dh_B_exp:.4f}, dH(t2=1e7s)={dh_B_inf:.4f}")
-    print(f"  Convergence gap at 1e7s: {abs(dh_A_inf - dh_B_inf):.6f}")
-    print(f"  Gap at 1000s: {abs(dh_A_exp - dh_B_exp):.4f}")
-    print(f"  Gap reduction: {abs(dh_A_exp - dh_B_exp) - abs(dh_A_inf - dh_B_inf):.4f}")
+for stage_name, p in [('Stage 1 (Shape)', s1_params), ('Stage 2 (Absolute)', s2_params)]:
+    m = TNMModel(A=10**p['logA'], H_star=p['H_star'], x=p['x'],
+                 beta=p['beta'], T0=p['T0'])
+    print(f"  [{stage_name}]")
+    print(f"    logA={p['logA']:.3f}, H*={p['H_star']/1000:.1f}, x={p['x']:.4f}, "
+          f"beta={p['beta']:.4f}, T0={p['T0']:.0f}K")
+
+    for name, T1, T2, t1_s, t1_l in [
+        ('Two-step 90C->80C', T_90C, T_80C, T1_HOLD_SHORT, T1_HOLD_LONG),
+        ('Kovacs   80C->90C', T_80C, T_90C, T1_HOLD_SHORT, T1_HOLD_LONG),
+    ]:
+        dh_A_1e3 = m.delta_H_two_step(T1, t1_s, T2, 1e3)
+        dh_B_1e3 = m.delta_H_two_step(T1, t1_l, T2, 1e3)
+        dh_A_inf = m.delta_H_two_step(T1, t1_s, T2, 1e7)
+        dh_B_inf = m.delta_H_two_step(T1, t1_l, T2, 1e7)
+        gap_1e3 = abs(dh_A_1e3 - dh_B_1e3)
+        gap_inf = abs(dh_A_inf - dh_B_inf)
+
+        # Find t2 where gap drops below 0.1% (0.001 in dH_norm)
+        t2_conv = None
+        for t_test in np.logspace(3, 8, 100):
+            dh_A = m.delta_H_two_step(T1, t1_s, T2, t_test)
+            dh_B = m.delta_H_two_step(T1, t1_l, T2, t_test)
+            if abs(dh_A - dh_B) < 0.001:
+                t2_conv = t_test
+                break
+
+        print(f"    {name}:")
+        print(f"      Gap at t2=1000s:  {gap_1e3:.5f}")
+        print(f"      Gap at t2=1e7s:   {gap_inf:.6f}")
+        if t2_conv:
+            conv_label = f'{t2_conv/3600:.1f}h' if t2_conv < 86400 else f'{t2_conv/86400:.1f}d'
+            print(f"      Converges (<0.1%) at t2 ≈ {t2_conv:.0f}s ({conv_label})")
+    print()
