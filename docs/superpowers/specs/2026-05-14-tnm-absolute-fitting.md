@@ -19,6 +19,7 @@ Fit TNM model directly to absolute ΔH (kJ/mol), then extend annealing time to 1
 ## Phase 2: Two-step 90°C→80°C
 
 - **Data:** `twosteps_v2_results.csv`, Grp A (T1=0.833min) and Grp B (T1=8.333min)
+- **Physics:** Two-step ΔH follows S-shaped curve: slow initial increase (memory of T1 pre-annealing) → rapid increase (memory fades, structure responds to T2) → plateau (equilibrium at T2). This differs from one-step's monotonic approach to plateau. The TNM model captures this via the double-exponential two-step formula where the two KWW terms ((T0-T1)*exp(-(S1+S2)^β) and (T1-T2)*exp(-S2^β)) decay at different rates.
 - **Model:** Same instantaneous-quench TNM, 6 parameters, fit jointly to both groups
 - **Cost:** `Σ (ΔH_model - ΔH_exp)²` across all 20 two-step points
 - **Output:** Single 4-panel figure:
