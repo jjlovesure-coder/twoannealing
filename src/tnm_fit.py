@@ -154,16 +154,16 @@ def run_stage1(targets, seed=None):
     """Multi-start L-BFGS-B for one-step shape fitting."""
     rng = np.random.RandomState(seed)
     bounds = [
-        (-40, -8),          # logA
-        (100000, 500000),   # H_star (J/mol)
-        (0.05, 0.9),        # x
-        (0.1, 0.9),         # beta
-        (365, 400),         # T0 (K)
+        (-25, -12),         # logA (A ~ 1e-25 to 1e-12 s)
+        (60000, 400000),    # H_star (J/mol)
+        (0.05, 0.8),        # x
+        (0.1, 0.7),         # beta
+        (370, 400),         # T0 (K, near PS Tg ~373K)
     ]
 
     best_result = None
     best_cost = np.inf
-    n_starts = 30
+    n_starts = 40
 
     print(f"  Stage 1: Multi-start L-BFGS-B ({n_starts} starts, 5 params)...")
     for k in range(n_starts):
@@ -191,7 +191,7 @@ def run_stage2(targets, stage1_params, seed=None):
     x0 = [stage1_params['logA'], stage1_params['H_star'],
           stage1_params['x'], stage1_params['beta'], stage1_params['T0']]
     bounds = [
-        (-40, -8), (100000, 500000), (0.05, 0.9), (0.1, 0.9), (365, 400),
+        (-25, -12), (60000, 400000), (0.05, 0.8), (0.1, 0.7), (370, 400),
     ]
 
     print("  Stage 2: L-BFGS-B with absolute-scale cost...")

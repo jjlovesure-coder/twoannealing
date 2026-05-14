@@ -185,19 +185,20 @@ class TNMModel:
                            cooling_rate=1.0, heating_rate=None):
         """One-step delta_H normalized.
 
-        delta_H = (Tf_end - T_anneal) / (T0 - T_anneal)
-        0 = fully relaxed, 1 = unrelaxed.
+        delta_H = (T0 - Tf_end) / (T0 - T_anneal)
+        0 = unrelaxed (Tf = T0), 1 = fully relaxed (Tf = T_anneal).
+        Longer annealing -> larger Tf drop -> larger delta_H.
         """
         T_f_end, T_f_start = self.simulate_one_step(
             T_anneal, t_hold, T_initial, cooling_rate, heating_rate)
-        return (T_f_end - T_anneal) / max(self.T0 - T_anneal, 1.0)
+        return (self.T0 - T_f_end) / max(self.T0 - T_anneal, 1.0)
 
     def delta_H_two_step(self, T1, t1_hold, T2, t2_hold, T_initial=473.15,
                          cooling_rate=1.0, heating_rate=None):
         """Two-step delta_H normalized.
 
-        delta_H = (Tf_end - T2) / (T0 - T2)
+        delta_H = (T0 - Tf_end) / (T0 - T2)
         """
         T_f_end, T_f_start = self.simulate_two_step(
             T1, t1_hold, T2, t2_hold, T_initial, cooling_rate, heating_rate)
-        return (T_f_end - T2) / max(self.T0 - T2, 1.0)
+        return (self.T0 - T_f_end) / max(self.T0 - T2, 1.0)
