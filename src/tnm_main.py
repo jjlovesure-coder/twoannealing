@@ -44,10 +44,10 @@ def compute_sim_kJ_data(model, targets):
     group_map = {
         'os50': ('os50', 'run1'),
         'os70': ('os70', 'run1'),
-        'tsA': ('ts', 'grpA'),
-        'tsB': ('ts', 'grpB'),
-        'kvA': ('kovacs', 'grpA'),
-        'kvB': ('kovacs', 'grpB'),
+        'tsA': ('ts', 'ts_grpA'),
+        'tsB': ('ts', 'ts_grpB'),
+        'kvA': ('kovacs', 'kov_grpA'),
+        'kvB': ('kovacs', 'kov_grpB'),
     }
 
     for sim_key, (exp_key, grp_key) in group_map.items():
@@ -85,10 +85,10 @@ def compute_all_r2(sim_data_kJ, targets):
     group_map = {
         'os50': ('os50', 'run1'),
         'os70': ('os70', 'run1'),
-        'tsA': ('ts', 'grpA'),
-        'tsB': ('ts', 'grpB'),
-        'kvA': ('kovacs', 'grpA'),
-        'kvB': ('kovacs', 'grpB'),
+        'tsA': ('ts', 'ts_grpA'),
+        'tsB': ('ts', 'ts_grpB'),
+        'kvA': ('kovacs', 'kov_grpA'),
+        'kvB': ('kovacs', 'kov_grpB'),
     }
     for sim_key, (exp_key, grp_key) in group_map.items():
         exp = targets[exp_key]
@@ -202,7 +202,12 @@ def main():
 
     # Generate plots
     print("\n[6] Generating plots...")
+    # Add grp-style keys that plot functions expect
     sim_for_plot = {k: sim_kJ_s2[k] for k in sim_kJ_s2}
+    sim_for_plot['ts_grpA'] = sim_kJ_s2['tsA']
+    sim_for_plot['ts_grpB'] = sim_kJ_s2['tsB']
+    sim_for_plot['kov_grpA'] = sim_kJ_s2['kvA']
+    sim_for_plot['kov_grpB'] = sim_kJ_s2['kvB']
 
     plot_one_step_fit(
         targets, sim_for_plot, s2_params,

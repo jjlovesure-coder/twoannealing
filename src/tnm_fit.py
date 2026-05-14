@@ -70,10 +70,10 @@ def simulate_protocol_match_exp(model, protocol_key, targets):
     group_map = {
         'os50': ('os50', 'run1'),
         'os70': ('os70', 'run1'),
-        'tsA': ('ts', 'grpA'),
-        'tsB': ('ts', 'grpB'),
-        'kvA': ('kovacs', 'grpA'),
-        'kvB': ('kovacs', 'grpB'),
+        'tsA': ('ts', 'ts_grpA'),
+        'tsB': ('ts', 'ts_grpB'),
+        'kvA': ('kovacs', 'kov_grpA'),
+        'kvB': ('kovacs', 'kov_grpB'),
     }
     exp_key, grp_key = group_map[protocol_key]
     exp = targets[exp_key]
@@ -139,11 +139,11 @@ def stage2_cost_absolute(packed, targets):
     chi2 = 0.0
     n_pts = 0
     for key in ['os50', 'os70', 'tsA', 'tsB']:
-        _, dh_exp_norm_vals, dh_exp_kJ, _, _, _ = \
+        dh_sim_norm_vals, dh_exp_norm, dh_exp_kJ, _, _, _ = \
             simulate_protocol_match_exp(model, key, targets)
 
-        a, b = np.polyfit(dh_exp_norm_vals, dh_exp_kJ, 1)
-        dh_sim_kJ = a * dh_exp_norm_vals + b
+        a, b = np.polyfit(dh_sim_norm_vals, dh_exp_kJ, 1)
+        dh_sim_kJ = a * dh_sim_norm_vals + b
         chi2 += np.sum((dh_sim_kJ - dh_exp_kJ) ** 2)
         n_pts += len(dh_exp_kJ)
 

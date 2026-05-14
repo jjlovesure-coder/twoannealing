@@ -100,6 +100,9 @@ def build_target_vectors():
 
     for key in ['ts', 'kovacs']:
         t, dh, grp = extract_two_step(exp_data[key])
-        result[key] = {'t': t, 'dH': dh, 'groups': grp}
+        # Add prefix to distinguish ts vs kovacs groups
+        prefix = 'ts' if key == 'ts' else 'kov'
+        prefixed = np.array([f'{prefix}_{g}' for g in grp])
+        result[key] = {'t': t, 'dH': dh, 'groups': prefixed}
 
     return result
