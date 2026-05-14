@@ -91,7 +91,7 @@ def simulate_protocol_match_exp(model, protocol_key, targets):
 def stage1_cost_shape(packed, targets):
     """Stage 1: Shape cost on one-step 50C + 70C (normalized [0,1])."""
     logA, H_star, x, beta, T0 = packed[0], packed[1], packed[2], packed[3], packed[4]
-    if not (0.01 < x <= 0.99 and 0.02 < beta <= 0.99 and H_star > 30000 and 360 < T0 < 420):
+    if not (0.001 < x <= 0.999 and 0.005 < beta <= 0.999 and H_star > 30000 and 360 < T0 < 430):
         return 1e10
 
     try:
@@ -118,7 +118,7 @@ def stage2_cost_absolute(packed, targets):
     Uses dh_sim_norm → dh_exp_kJ linear fit per protocol.
     """
     logA, H_star, x, beta, T0 = packed[0], packed[1], packed[2], packed[3], packed[4]
-    if not (0.01 < x <= 0.99 and 0.02 < beta <= 0.99 and H_star > 30000 and 360 < T0 < 420):
+    if not (0.001 < x <= 0.999 and 0.005 < beta <= 0.999 and H_star > 30000 and 360 < T0 < 430):
         return 1e10
 
     try:
@@ -153,9 +153,9 @@ def run_stage1(targets, seed=None):
     bounds = [
         (-25, -12),         # logA
         (60000, 300000),    # H_star (J/mol)
-        (0.02, 0.9),        # x
-        (0.05, 0.9),        # beta
-        (370, 400),         # T0 (K)
+        (0.005, 0.9),       # x
+        (0.01, 0.9),        # beta
+        (370, 420),         # T0 (K)
     ]
 
     best_result = None
