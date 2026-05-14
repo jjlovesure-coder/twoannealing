@@ -154,16 +154,16 @@ def run_stage1(targets, seed=None):
     """Multi-start L-BFGS-B for one-step shape fitting."""
     rng = np.random.RandomState(seed)
     bounds = [
-        (-25, -12),         # logA (A ~ 1e-25 to 1e-12 s)
-        (60000, 400000),    # H_star (J/mol)
-        (0.05, 0.8),        # x
-        (0.1, 0.7),         # beta
-        (370, 400),         # T0 (K, near PS Tg ~373K)
+        (-30, -12),         # logA (A ~ 1e-30 to 1e-12 s)
+        (40000, 500000),    # H_star (J/mol)
+        (0.01, 0.9),        # x
+        (0.02, 0.9),         # beta
+        (360, 400),         # T0 (K, near PS Tg ~373K)
     ]
 
     best_result = None
     best_cost = np.inf
-    n_starts = 40
+    n_starts = 60
 
     print(f"  Stage 1: Multi-start L-BFGS-B ({n_starts} starts, 5 params)...")
     for k in range(n_starts):

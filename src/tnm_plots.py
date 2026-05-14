@@ -380,18 +380,19 @@ def plot_residuals(exp_data, sim_data, output_path):
     """Residual analysis: delta_H_residual vs hold time."""
     fig, axes = plt.subplots(1, 2, figsize=(14, 6))
 
-    # One-step residuals
+    # One-step residuals (use run1 only)
     ax = axes[0]
     for protocol, T_C, color in [
         ('os50', 50, C_OS50), ('os70', 70, C_OS70)
     ]:
         exp = exp_data[protocol]
-        n = len(exp['dH'])
-        t_exp = exp['t'] / 60.0
-        dH_e = exp['dH']
+        mask = exp['groups'] == 'run1'
+        t_exp = exp['t'][mask] / 60.0
+        dH_e = exp['dH'][mask]
         dH_s = sim_data[protocol]
+        dH_s = dH_s[:len(dH_e)]
 
-        residuals = dH_s[:len(dH_e)] - dH_e
+        residuals = dH_s - dH_e
         ax.plot(t_exp, residuals, 'o', color=color, markersize=7,
                 markerfacecolor='white', markeredgewidth=1.2,
                 label=f'{T_C}C')
