@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """
-Verify TNM reference implementation against MATLAB results.
-Generates comparison plot showing Tf evolution for all 3 protocols.
+Verify TNM reference model physical consistency using Au MBMG parameters.
+Runs 3 protocols from the MATLAB reference (isothermal, no cooling ramps)
+and checks Tf evolution satisfies physical constraints (monotonicity, range
+bounds, Kovacs memory hump). Saves plot and reference CSV data.
 """
 import os
 import sys
@@ -20,7 +22,6 @@ A = 6e-22            # seconds
 X = 0.6
 BETA = 0.43
 T0 = 430.0           # K, initial fictive temperature
-R = 8.314
 
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RESULTS_DIR = os.path.join(ROOT_DIR, 'results', 'tnm')
@@ -114,7 +115,7 @@ def plot_results(results):
     axes[0].axhline(y=Ta, color='gray', linestyle='--', alpha=0.5)
 
     # Panel (b): Two-step hi-to-lo (383K -> 373K)
-    t_b, Tf_b, T1_b, T2_b = results['b']
+    t_b, Tf_b, _, T2_b = results['b']
     axes[1].semilogx(t_b, Tf_b, 'b-', linewidth=2)
     axes[1].set_xlabel('t_2 (s)')
     axes[1].set_ylabel('Fictive Temperature T_f (K)')
@@ -155,7 +156,7 @@ def save_reference_data(results):
 
 def main():
     print("=" * 60)
-    print("  TNM Reference Verification (vs MATLAB)")
+    print("  TNM Reference Model — Physical Consistency Check")
     print("=" * 60)
     print(f"\n  Parameters:")
     print(f"    H* = {H_STAR/1000:.0f} kJ/mol")
