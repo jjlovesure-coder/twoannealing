@@ -238,7 +238,7 @@ def _trace_one_step(model, T_anneal, t_hold, T_initial=473.15,
     t_cur = 0.0
 
     # Cooling ramp
-    T_f, xi = model._simulate_ramp(T_initial, T_anneal, cooling, T_initial, 0.0)
+    T_f, xi, _, _ = model._simulate_ramp(T_initial, T_anneal, cooling, T_initial, 0.0)
     dT = abs(T_initial - T_anneal)
     n = max(10, int(dT / 2))
     for i in range(n):
@@ -257,7 +257,7 @@ def _trace_one_step(model, T_anneal, t_hold, T_initial=473.15,
         t_start = max(0.02, t_hold / 200)
         t_steps = np.logspace(np.log10(t_start), np.log10(t_hold), n_h)
         t_steps = np.unique(np.round(t_steps, 8))
-    _, _, _ = model._simulate_hold(T_anneal, t_hold, T_f, xi)
+    _, _, _, _, _ = model._simulate_hold(T_anneal, t_hold, T_f, xi)
     for th in t_steps:
         t_cur += (th - (t_steps[t_steps < th][-1] if len(t_steps[t_steps < th]) > 0 else 0))
         T_list.append(T_anneal)
