@@ -113,8 +113,11 @@ def stage1_cost_shape(packed, targets):
     chi2 = 0.0
     n_pts = 0
     for key in ['os50', 'os70']:
-        dh_sim_norm, dh_exp_norm, _, _, _, _ = \
+        dh_sim_norm, dh_exp_norm, _, _, dh_sim_raw, _ = \
             simulate_protocol_match_exp(model, key, targets)
+        # Penalize degenerate (constant) model output
+        if np.std(dh_sim_raw) < 1e-8:
+            return 1e10
         chi2 += np.sum((dh_sim_norm - dh_exp_norm) ** 2)
         n_pts += len(dh_sim_norm)
 
@@ -154,16 +157,16 @@ def run_stage1(targets, seed=None):
     """Multi-start L-BFGS-B for one-step shape fitting."""
     rng = np.random.RandomState(seed)
     bounds = [
-        (-30, -12),         # logA (A ~ 1e-30 to 1e-12 s)
-        (40000, 500000),    # H_star (J/mol)
+        (-38, -24),         # logA (PS needs A ~ 1e-38 to 1e-24 s)
+        (150000, 500000),   # H_star (J/mol), larger for PS far below Tg
         (0.01, 0.9),        # x
-        (0.02, 0.9),         # beta
-        (360, 400),         # T0 (K, near PS Tg ~373K)
+        (0.05, 0.9),        # beta
+        (370, 400),         # T0 (K, near PS Tg ~373K)
     ]
 
     best_result = None
     best_cost = np.inf
-    n_starts = 60
+    n_starts = 80
 
     print(f"  Stage 1: Multi-start L-BFGS-B ({n_starts} starts, 5 params)...")
     for k in range(n_starts):
