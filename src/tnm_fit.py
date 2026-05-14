@@ -2,8 +2,8 @@
 Staged parameter optimization for TNM model fitting to DSC enthalpy data.
 
 Strategy:
-  Stage 1: Shape-fitting one-step (normalized [0,1]) — fits x, beta.
-  Stage 2: Absolute-scale fitting with all protocols (kJ/mol) — refines all params.
+  Stage 1: Shape-fitting one-step (normalized [0,1]) -> rough params.
+  Stage 2: Absolute-scale fitting (kJ/mol) with all protocols -> refine.
   Stage 3: Kovacs prediction (no fitting, hold-out validation).
 """
 
@@ -22,37 +22,33 @@ def make_model(logA, H_star, x, beta, T0):
 
 
 def simulate_protocol_raw(model, protocol_key):
-    """Simulate raw delta_H_norm for a protocol at the 10 canonical hold times.
+    """Simulate raw delta_H_norm at the 10 canonical hold times.
 
-    Returns (t_sec, dh_sim_norm) arrays.
+    Returns (t_sec, dh_raw) arrays.
     """
     if protocol_key in ('os50', 'os70'):
         T_a = T_50C if protocol_key == 'os50' else T_70C
-        dh = np.array([model.delta_H_normalized(T_a, th, T_INITIAL, COOLING_RATE)
+        dh = np.array([model.delta_H_normalized(T_a, th)
                        for th in HOLD_TIMES_SEC])
         return HOLD_TIMES_SEC.copy(), dh
 
     elif protocol_key == 'tsA':
-        dh = np.array([model.delta_H_two_step(T_90C, T1_HOLD_SHORT, T_80C, th,
-                                               T_INITIAL, COOLING_RATE)
+        dh = np.array([model.delta_H_two_step(T_90C, T1_HOLD_SHORT, T_80C, th)
                        for th in HOLD_TIMES_SEC])
         return HOLD_TIMES_SEC.copy(), dh
 
     elif protocol_key == 'tsB':
-        dh = np.array([model.delta_H_two_step(T_90C, T1_HOLD_LONG, T_80C, th,
-                                               T_INITIAL, COOLING_RATE)
+        dh = np.array([model.delta_H_two_step(T_90C, T1_HOLD_LONG, T_80C, th)
                        for th in HOLD_TIMES_SEC])
         return HOLD_TIMES_SEC.copy(), dh
 
     elif protocol_key == 'kvA':
-        dh = np.array([model.delta_H_two_step(T_80C, T1_HOLD_SHORT, T_90C, th,
-                                               T_INITIAL, COOLING_RATE)
+        dh = np.array([model.delta_H_two_step(T_80C, T1_HOLD_SHORT, T_90C, th)
                        for th in HOLD_TIMES_SEC])
         return HOLD_TIMES_SEC.copy(), dh
 
     elif protocol_key == 'kvB':
-        dh = np.array([model.delta_H_two_step(T_80C, T1_HOLD_LONG, T_90C, th,
-                                               T_INITIAL, COOLING_RATE)
+        dh = np.array([model.delta_H_two_step(T_80C, T1_HOLD_LONG, T_90C, th)
                        for th in HOLD_TIMES_SEC])
         return HOLD_TIMES_SEC.copy(), dh
 
@@ -61,7 +57,7 @@ def simulate_protocol_raw(model, protocol_key):
 
 
 def simulate_protocol_match_exp(model, protocol_key, targets):
-    """Simulate delta_H_norm, interpolated to match experimental hold times.
+    """Simulate delta_H_norm, interpolated to experimental time points.
 
     Returns (dh_sim_norm, dh_exp_norm, dh_exp_kJ, t_exp, dh_sim_raw, t_sim).
     """
@@ -81,43 +77,35 @@ def simulate_protocol_match_exp(model, protocol_key, targets):
     dh_exp = exp['dH'][mask]
     t_exp = exp['t'][mask]
 
-    # Normalize both sim and exp to [0, 1] for shape comparison
+    # Normalize both to [0, 1]
     s_min, s_max = dh_sim.min(), dh_sim.max()
-    if s_max - s_min < 1e-10:
-        dh_sim_norm = np.zeros_like(dh_sim)
-    else:
-        dh_sim_norm = (dh_sim - s_min) / (s_max - s_min)
+    dh_sim_norm = (dh_sim - s_min) / (s_max - s_min + 1e-15)
 
     e_min, e_max = dh_exp.min(), dh_exp.max()
-    if e_max - e_min < 1e-10:
-        dh_exp_norm = np.zeros_like(dh_exp)
-    else:
-        dh_exp_norm = (dh_exp - e_min) / (e_max - e_min)
+    dh_exp_norm = (dh_exp - e_min) / (e_max - e_min + 1e-15)
 
     dh_sim_interp = np.interp(t_exp, t_sim, dh_sim_norm)
-
     return dh_sim_interp, dh_exp_norm, dh_exp, t_exp, dh_sim, t_sim
 
 
 def stage1_cost_shape(packed, targets):
-    """Stage 1: Shape-only cost on one-step 50C + 70C (normalized [0,1])."""
+    """Stage 1: Shape cost on one-step 50C + 70C (normalized [0,1])."""
     logA, H_star, x, beta, T0 = packed[0], packed[1], packed[2], packed[3], packed[4]
-    if not (0.01 < x <= 0.99 and 0.05 < beta <= 0.99 and H_star > 50000 and T0 > 350):
-        return 1e12
+    if not (0.01 < x <= 0.99 and 0.02 < beta <= 0.99 and H_star > 30000 and 360 < T0 < 420):
+        return 1e10
 
     try:
         model = make_model(logA, H_star, x, beta, T0)
     except Exception:
-        return 1e12
+        return 1e10
 
     chi2 = 0.0
     n_pts = 0
     for key in ['os50', 'os70']:
         dh_sim_norm, dh_exp_norm, _, _, dh_sim_raw, _ = \
             simulate_protocol_match_exp(model, key, targets)
-        # Penalize degenerate (constant) model output
         if np.std(dh_sim_raw) < 1e-8:
-            return 1e10
+            return 1e8
         chi2 += np.sum((dh_sim_norm - dh_exp_norm) ** 2)
         n_pts += len(dh_sim_norm)
 
@@ -125,28 +113,34 @@ def stage1_cost_shape(packed, targets):
 
 
 def stage2_cost_absolute(packed, targets):
-    """Stage 2: Absolute-scale cost using linear mapping sim_norm -> kJ/mol.
+    """Stage 2: Fit sim_norm to experimental kJ/mol via linear scaling.
 
-    Fits dh_exp ≈ a * dh_sim_norm + b per protocol group,
-    then computes weighted RMS across all fitted protocols.
+    Uses dh_sim_norm → dh_exp_kJ linear fit per protocol.
     """
     logA, H_star, x, beta, T0 = packed[0], packed[1], packed[2], packed[3], packed[4]
-    if not (0.01 < x <= 0.99 and 0.05 < beta <= 0.99 and H_star > 50000 and T0 > 350):
-        return 1e12
+    if not (0.01 < x <= 0.99 and 0.02 < beta <= 0.99 and H_star > 30000 and 360 < T0 < 420):
+        return 1e10
 
     try:
         model = make_model(logA, H_star, x, beta, T0)
     except Exception:
-        return 1e12
+        return 1e10
 
     chi2 = 0.0
     n_pts = 0
     for key in ['os50', 'os70', 'tsA', 'tsB']:
-        dh_sim_norm_vals, dh_exp_norm, dh_exp_kJ, _, _, _ = \
+        dh_sim_norm, _, dh_exp_kJ, _, dh_sim_raw, _ = \
             simulate_protocol_match_exp(model, key, targets)
 
-        a, b = np.polyfit(dh_sim_norm_vals, dh_exp_kJ, 1)
-        dh_sim_kJ = a * dh_sim_norm_vals + b
+        if np.std(dh_sim_raw) < 1e-8:
+            return 1e8
+
+        # Scale sim norm to exp kJ via linear fit
+        try:
+            a, b = np.polyfit(dh_sim_norm, dh_exp_kJ, 1)
+        except Exception:
+            return 1e8
+        dh_sim_kJ = a * dh_sim_norm + b
         chi2 += np.sum((dh_sim_kJ - dh_exp_kJ) ** 2)
         n_pts += len(dh_exp_kJ)
 
@@ -157,16 +151,16 @@ def run_stage1(targets, seed=None):
     """Multi-start L-BFGS-B for one-step shape fitting."""
     rng = np.random.RandomState(seed)
     bounds = [
-        (-38, -24),         # logA (PS needs A ~ 1e-38 to 1e-24 s)
-        (150000, 500000),   # H_star (J/mol), larger for PS far below Tg
-        (0.01, 0.9),        # x
+        (-25, -12),         # logA
+        (60000, 300000),    # H_star (J/mol)
+        (0.02, 0.9),        # x
         (0.05, 0.9),        # beta
-        (370, 400),         # T0 (K, near PS Tg ~373K)
+        (370, 400),         # T0 (K)
     ]
 
     best_result = None
     best_cost = np.inf
-    n_starts = 30
+    n_starts = 25
 
     print(f"  Stage 1: Multi-start L-BFGS-B ({n_starts} starts, 5 params)...")
     for k in range(n_starts):
@@ -194,7 +188,7 @@ def run_stage2(targets, stage1_params, seed=None):
     x0 = [stage1_params['logA'], stage1_params['H_star'],
           stage1_params['x'], stage1_params['beta'], stage1_params['T0']]
     bounds = [
-        (-25, -12), (60000, 400000), (0.05, 0.8), (0.1, 0.7), (370, 400),
+        (-25, -12), (60000, 300000), (0.02, 0.9), (0.05, 0.9), (370, 400),
     ]
 
     print("  Stage 2: L-BFGS-B with absolute-scale cost...")

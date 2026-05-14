@@ -230,43 +230,6 @@ def plot_parity(sim_data, exp_data, output_path):
     print(f"  Saved {output_path}")
 
 
-def _trace_one_step(model, T_anneal, t_hold, T_initial=473.15,
-                    cooling=1.0, heating=10.0/60.0, n_hold_pts=30):
-    """Trace T_f evolution for one-step protocol, return (T, T_f, t) arrays."""
-    from tnm_conditions import T_50C
-    T_list, Tf_list, t_list = [], [], []
-    t_cur = 0.0
-
-    # Cooling ramp
-    T_f, xi, _, _ = model._simulate_ramp(T_initial, T_anneal, cooling, T_initial, 0.0)
-    dT = abs(T_initial - T_anneal)
-    n = max(10, int(dT / 2))
-    for i in range(n):
-        T = T_initial + (T_anneal - T_initial) * (i + 1) / n
-        t_cur += dT / cooling / n
-        T_list.append(T)
-        t_list.append(t_cur)
-        Tf_list.append(T)  # approximate T_f during cooling as T
-
-    # Isothermal hold
-    if t_hold < 1:
-        n_h = max(3, min(30, int(t_hold / 0.005) + 3))
-        t_steps = np.linspace(0, t_hold, n_h + 1)[1:]
-    else:
-        n_h = max(8, min(50, int(np.log10(t_hold) * 20 + 10)))
-        t_start = max(0.02, t_hold / 200)
-        t_steps = np.logspace(np.log10(t_start), np.log10(t_hold), n_h)
-        t_steps = np.unique(np.round(t_steps, 8))
-    _, _, _, _, _ = model._simulate_hold(T_anneal, t_hold, T_f, xi)
-    for th in t_steps:
-        t_cur += (th - (t_steps[t_steps < th][-1] if len(t_steps[t_steps < th]) > 0 else 0))
-        T_list.append(T_anneal)
-        t_list.append(t_cur)
-        Tf_list.append(T_anneal)
-
-    return np.array(T_list), np.array(Tf_list), np.array(t_list)
-
-
 def plot_tf_evolution(model, output_path):
     """T_f evolution for representative conditions — simplified visualization."""
     from tnm_conditions import T_50C, T_70C, T_80C, T_90C, HOLD_TIMES_SEC
