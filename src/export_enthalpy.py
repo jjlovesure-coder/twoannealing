@@ -12,6 +12,7 @@ from scipy.integrate import trapezoid
 
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_DIR = os.path.join(ROOT_DIR, 'data')
+RESULTS_DIR = os.path.join(ROOT_DIR, 'results', 'enthalpy')
 sys.path.insert(0, os.path.join(ROOT_DIR, 'src'))
 
 M_SAMPLE = 4.7
@@ -386,6 +387,7 @@ def main():
     print("=" * 70)
 
     os.makedirs(DATA_DIR, exist_ok=True)
+    os.makedirs(RESULTS_DIR, exist_ok=True)
 
     # ── One-step 50°C ──
     print("\n[1/4] One-step annealing 50°C ...")
@@ -393,7 +395,7 @@ def main():
         os.path.join(DATA_DIR, 'PS-onestep-01.xlsx'),
         sheet='PS-onestep-01', T_anneal=50, label='One-step 50C'
     )
-    out = os.path.join(DATA_DIR, 'enthalpy_onestep_50C.csv')
+    out = os.path.join(RESULTS_DIR, 'enthalpy_onestep_50C.csv')
     df_os_50.to_csv(out, index=False, float_format='%.4f')
     print(f"  Saved {out}  ({len(df_os_50)} rows)")
     print(df_os_50.to_string(index=False))
@@ -404,7 +406,7 @@ def main():
         os.path.join(DATA_DIR, 'PS-onestep-02.xlsx'),
         sheet='PS-onestep-02', T_anneal=70, label='One-step 70C'
     )
-    out = os.path.join(DATA_DIR, 'enthalpy_onestep_70C.csv')
+    out = os.path.join(RESULTS_DIR, 'enthalpy_onestep_70C.csv')
     df_os_70.to_csv(out, index=False, float_format='%.4f')
     print(f"  Saved {out}  ({len(df_os_70)} rows)")
     print(df_os_70.to_string(index=False))
@@ -415,7 +417,7 @@ def main():
         os.path.join(DATA_DIR, 'twosteps.xlsx'),
         sheet='PS-02', label='Two-step'
     )
-    out = os.path.join(DATA_DIR, 'enthalpy_twosteps.csv')
+    out = os.path.join(RESULTS_DIR, 'enthalpy_twosteps.csv')
     df_ts.to_csv(out, index=False, float_format='%.4f')
     print(f"  Saved {out}  ({len(df_ts)} rows)")
     print(df_ts.to_string(index=False))
@@ -426,15 +428,13 @@ def main():
         os.path.join(DATA_DIR, 'pskovacs.xlsx'),
         sheet='PS-kovacs-01', label='Kovacs'
     )
-    out = os.path.join(DATA_DIR, 'enthalpy_kovacs.csv')
+    out = os.path.join(RESULTS_DIR, 'enthalpy_kovacs.csv')
     df_kov.to_csv(out, index=False, float_format='%.4f')
     print(f"  Saved {out}  ({len(df_kov)} rows)")
     print(df_kov.to_string(index=False))
 
     print(f"\n{'=' * 70}")
-    print(f"  All enthalpy data exported to {DATA_DIR}/")
-    print(f"  Files: enthalpy_onestep_50C.csv, enthalpy_onestep_70C.csv,")
-    print(f"         enthalpy_twosteps.csv, enthalpy_kovacs.csv")
+    print(f"  All enthalpy data exported to {RESULTS_DIR}/")
     print(f"{'=' * 70}")
 
 
