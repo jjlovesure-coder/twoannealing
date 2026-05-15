@@ -21,7 +21,7 @@ BETA = HEATING_RATE / 60.0
 DT_DT = 1.0 / BETA
 CONV_FACTOR = DT_DT / (M_SAMPLE * 1000)
 CONV_JG = CONV_FACTOR  # µW·°C → J/g
-T_INT_LOW = 50
+T_INT_LOW = 40
 
 
 def load_empty():
