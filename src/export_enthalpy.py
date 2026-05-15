@@ -180,7 +180,11 @@ def process_onestep(data_file, sheet, T_anneal, label, interp_empty):
             all_integrals.append(np.nan)
 
     integrals = np.array(all_integrals)
-    dH = -integrals * CONV_JG  # flip sign: endothermic → positive
+    # Δh_i = (integral_i − integral_ref) × CONV
+    # reference = as-cooled state (ramp 1, shortest hold)
+    # Δh_ref ≡ 0, Δh_i > 0 for annealed states
+    ref = integrals[0]
+    dH = (integrals - ref) * CONV_JG
 
     # Determine cooling group (50s vs 500s) from program pattern
     n = len(conditions)
@@ -271,7 +275,11 @@ def process_twosteps(data_file, sheet, label, interp_empty):
             all_integrals.append(np.nan)
 
     integrals = np.array(all_integrals)
-    dH = -integrals * CONV_JG  # flip sign: endothermic → positive
+    # Δh_i = (integral_i − integral_ref) × CONV
+    # reference = as-cooled state (ramp 1, shortest hold)
+    # Δh_ref ≡ 0, Δh_i > 0 for annealed states
+    ref = integrals[0]
+    dH = (integrals - ref) * CONV_JG
 
     # Determine T1 group (50s vs 500s)
     n = len(conditions)
@@ -373,7 +381,11 @@ def process_kovacs(data_file, sheet, label, interp_empty):
             all_integrals.append(np.nan)
 
     integrals = np.array(all_integrals)
-    dH = -integrals * CONV_JG  # flip sign: endothermic → positive
+    # Δh_i = (integral_i − integral_ref) × CONV
+    # reference = as-cooled state (ramp 1, shortest hold)
+    # Δh_ref ≡ 0, Δh_i > 0 for annealed states
+    ref = integrals[0]
+    dH = (integrals - ref) * CONV_JG
 
     n = len(conditions)
     midpoint = n // 2
