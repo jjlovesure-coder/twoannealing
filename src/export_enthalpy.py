@@ -124,26 +124,7 @@ def find_liquid_onset(T_seg, DSC_seg, T_liq_fit_lo=110, T_liq_fit_hi=160, T_tg_l
     return np.nan
 
 
-def compute_reference_integral(data_file, sheet, interp_empty):
-    """Compute reference integral from one-step 70°C ramp 1 (0.1s, as-cooled)."""
-    exp_data, _ = load_dsc_experiment(data_file, sheet=sheet)
-    T_exp = exp_data['Temp'].values
-    DSC_exp = exp_data['DSC'].values
-    t_exp = exp_data['Time'].values
-    ramps = detect_heating_ramps(T_exp, t_exp)
-    s, e = ramps[0]
-    T_seg = T_exp[s:e + 1]
-    DSC_seg = DSC_exp[s:e + 1]
-    T_onset = find_liquid_onset(T_seg, DSC_seg)
-    interp_dsc = interp1d(T_seg, DSC_seg, kind='linear', bounds_error=False, fill_value='extrapolate')
-    T_grid = np.arange(T_INT_LOW, T_onset + 0.01, 0.1)
-    delta_DSC = interp_dsc(T_grid) - interp_empty(T_grid)
-    ref_integral = trapezoid(delta_DSC, T_grid)
-    print(f"  Reference (one-step 70°C, ramp 1): integral={ref_integral:.2f}, T_onset={T_onset:.2f}°C")
-    return ref_integral
-
-
-def process_onestep(data_file, sheet, T_anneal, label, interp_empty, ref_integral):
+def process_onestep(data_file, sheet, T_anneal, label, interp_empty):
     """Process one-step annealing and return enriched DataFrame."""
     exp_data, program = load_dsc_experiment(data_file, sheet=sheet)
     T_exp = exp_data['Temp'].values
@@ -199,7 +180,8 @@ def process_onestep(data_file, sheet, T_anneal, label, interp_empty, ref_integra
             all_integrals.append(np.nan)
 
     integrals = np.array(all_integrals)
-    dH = (integrals - ref_integral) * CONV_JG
+    ref = integrals[0]
+    dH = (integrals - ref) * CONV_JG
 
     # Determine cooling group (50s vs 500s) from program pattern
     n = len(conditions)
@@ -223,7 +205,7 @@ def process_onestep(data_file, sheet, T_anneal, label, interp_empty, ref_integra
     return pd.DataFrame(results)
 
 
-def process_twosteps(data_file, sheet, label, interp_empty, ref_integral):
+def process_twosteps(data_file, sheet, label, interp_empty):
     """Process two-step annealing and return enriched DataFrame."""
     exp_data, program = load_dsc_experiment(data_file, sheet=sheet)
     T_exp = exp_data['Temp'].values
@@ -290,7 +272,8 @@ def process_twosteps(data_file, sheet, label, interp_empty, ref_integral):
             all_integrals.append(np.nan)
 
     integrals = np.array(all_integrals)
-    dH = (integrals - ref_integral) * CONV_JG
+    ref = integrals[0]
+    dH = (integrals - ref) * CONV_JG
 
     # Determine T1 group (50s vs 500s)
     n = len(conditions)
@@ -317,7 +300,7 @@ def process_twosteps(data_file, sheet, label, interp_empty, ref_integral):
     return pd.DataFrame(results)
 
 
-def process_kovacs(data_file, sheet, label, interp_empty, ref_integral):
+def process_kovacs(data_file, sheet, label, interp_empty):
     """Process Kovacs up-jump annealing and return enriched DataFrame."""
     exp_data, program = load_dsc_experiment(data_file, sheet=sheet)
     T_exp = exp_data['Temp'].values
@@ -392,7 +375,8 @@ def process_kovacs(data_file, sheet, label, interp_empty, ref_integral):
             all_integrals.append(np.nan)
 
     integrals = np.array(all_integrals)
-    dH = (integrals - ref_integral) * CONV_JG
+    ref = integrals[0]
+    dH = (integrals - ref) * CONV_JG
 
     n = len(conditions)
     midpoint = n // 2
@@ -431,18 +415,12 @@ def main():
     # Load empty baseline
     interp_empty = load_empty()
 
-    # Compute reference integral from one-step 70°C, ramp 1 (0.1s, as-cooled state)
-    print("\n[0] Computing reference integral (one-step 70°C, ramp 1 = as-cooled)...")
-    ref_integral = compute_reference_integral(
-        os.path.join(DATA_DIR, 'PS-onestep-02.xlsx'),
-        'PS-onestep-02', interp_empty)
-
     # ── One-step 50°C ──
     print("\n[1/4] One-step annealing 50°C ...")
     df_os_50 = process_onestep(
         os.path.join(DATA_DIR, 'PS-onestep-01.xlsx'),
         sheet='PS-onestep-01', T_anneal=50, label='One-step 50C',
-        interp_empty=interp_empty, ref_integral=ref_integral,
+        interp_empty=interp_empty,
     )
     out = os.path.join(RESULTS_DIR, 'enthalpy_onestep_50C.csv')
     df_os_50.to_csv(out, index=False, float_format='%.4f')
@@ -454,7 +432,7 @@ def main():
     df_os_70 = process_onestep(
         os.path.join(DATA_DIR, 'PS-onestep-02.xlsx'),
         sheet='PS-onestep-02', T_anneal=70, label='One-step 70C',
-        interp_empty=interp_empty, ref_integral=ref_integral,
+        interp_empty=interp_empty,
     )
     out = os.path.join(RESULTS_DIR, 'enthalpy_onestep_70C.csv')
     df_os_70.to_csv(out, index=False, float_format='%.4f')
@@ -466,7 +444,7 @@ def main():
     df_ts = process_twosteps(
         os.path.join(DATA_DIR, 'twosteps.xlsx'),
         sheet='PS-02', label='Two-step',
-        interp_empty=interp_empty, ref_integral=ref_integral,
+        interp_empty=interp_empty,
     )
     out = os.path.join(RESULTS_DIR, 'enthalpy_twosteps.csv')
     df_ts.to_csv(out, index=False, float_format='%.4f')
@@ -478,7 +456,7 @@ def main():
     df_kov = process_kovacs(
         os.path.join(DATA_DIR, 'pskovacs.xlsx'),
         sheet='PS-kovacs-01', label='Kovacs',
-        interp_empty=interp_empty, ref_integral=ref_integral,
+        interp_empty=interp_empty,
     )
     out = os.path.join(RESULTS_DIR, 'enthalpy_kovacs.csv')
     df_kov.to_csv(out, index=False, float_format='%.4f')
