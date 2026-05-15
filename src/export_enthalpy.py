@@ -161,7 +161,10 @@ def process_onestep(data_file, sheet, T_anneal, label):
             all_integrals.append(np.nan)
 
     integrals = np.array(all_integrals)
-    dH = integrals * CONV_JG
+    # ΔH_released = integral_ramp − integral_ref (unannealed baseline)
+    # Positive = exothermic (energy released during annealing)
+    ref = integrals[0]
+    dH = (integrals - ref) * CONV_JG
 
     # Determine cooling group (50s vs 500s) from program pattern
     n = len(conditions)
@@ -251,7 +254,10 @@ def process_twosteps(data_file, sheet, label):
             all_integrals.append(np.nan)
 
     integrals = np.array(all_integrals)
-    dH = integrals * CONV_JG
+    # ΔH_released = integral_ramp − integral_ref (unannealed baseline)
+    # Positive = exothermic (energy released during annealing)
+    ref = integrals[0]
+    dH = (integrals - ref) * CONV_JG
 
     # Determine T1 group (50s vs 500s)
     n = len(conditions)
@@ -352,7 +358,10 @@ def process_kovacs(data_file, sheet, label):
             all_integrals.append(np.nan)
 
     integrals = np.array(all_integrals)
-    dH = integrals * CONV_JG
+    # ΔH_released = integral_ramp − integral_ref (unannealed baseline)
+    # Positive = exothermic (energy released during annealing)
+    ref = integrals[0]
+    dH = (integrals - ref) * CONV_JG
 
     n = len(conditions)
     midpoint = n // 2
