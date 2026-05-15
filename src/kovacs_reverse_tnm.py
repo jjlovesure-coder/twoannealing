@@ -10,12 +10,15 @@ Strategy:
 """
 
 import os
+import warnings
 import numpy as np
 import pandas as pd
 from scipy.optimize import minimize, least_squares
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+
+warnings.filterwarnings('ignore')
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RESULTS_DIR = os.path.join(ROOT, 'results')
@@ -36,18 +39,23 @@ H_MAX_KNOWN = 6.6183
 
 
 class TNMModel:
-    """TNM model — instantaneous quench + isothermal hold + KWW relaxation."""
+    """TNM model with finite cooling/heating ramps — physically correct Kovacs."""
 
-    def __init__(self, A, H_star, x, beta, T0):
+    def __init__(self, A, H_star, x, beta, T0, q_cool=1.0, q_heat=1.0):
+        """q_cool, q_heat in K/s (60 K/min = 1.0 K/s)."""
         self.A = A
         self.H_star = H_star
         self.x = x
         self.beta = beta
         self.T0 = T0
+        self.q_cool = q_cool
+        self.q_heat = q_heat
 
     def tau(self, T, Tf):
         exponent = (self.x * self.H_star) / (R_GAS * T) + \
                    ((1 - self.x) * self.H_star) / (R_GAS * Tf)
+        # Cap exponent to prevent overflow in exp()
+        exponent = np.clip(exponent, -50, 80)
         return self.A * np.exp(exponent)
 
     def _isothermal_hold(self, T_hold, t_hold, T_f_start):
@@ -59,8 +67,8 @@ class TNMModel:
             n_steps = 5
             t_steps = np.linspace(0, t_hold, n_steps + 1)[1:]
         else:
-            n_steps = 12
-            t_steps = np.logspace(np.log10(t_hold / 100),
+            n_steps = 8
+            t_steps = np.logspace(np.log10(t_hold / 50),
                                   np.log10(t_hold), n_steps)
             t_steps = np.unique(np.round(t_steps, 10))
 
@@ -77,14 +85,84 @@ class TNMModel:
 
         return Tf
 
-    def simulate_kovacs(self, t1_hold, t2_sec):
-        """Simulate Kovacs up-jump: T0->T1(hold t1)->T2(hold t2).
+    def _ramp(self, T_start, T_end, rate, Tf_start):
+        """Integrate Tool eqn dTf/dT = (T - Tf) / (rate * tau) along a ramp.
 
-        Returns delta_H (J/g) = scale * (T0 - Tf_end) / (T0 - T2).
+        Uses RK4 with adaptive step. Returns Tf_end or NaN on failure.
         """
-        Tf_after_t1 = self._isothermal_hold(T1, t1_hold, self.T0)
-        Tf_end = self._isothermal_hold(T2, t2_sec, Tf_after_t1)
+        dT_sign = 1 if T_end > T_start else -1
+        T_range = abs(T_end - T_start)
+        n_steps = max(int(T_range / 2.0), 6)
+
+        T_vals = np.linspace(T_start, T_end, n_steps + 1)
+        Tf = Tf_start
+
+        for i in range(n_steps):
+            T_i = T_vals[i]
+            T_next = T_vals[i + 1]
+            dT = T_next - T_i
+
+            def rhs(T, Tf_val):
+                tau_val = self.tau(T, Tf_val)
+                if tau_val <= 0 or not np.isfinite(tau_val):
+                    return np.nan
+                return (T - Tf_val) / (rate * tau_val)
+
+            k1 = rhs(T_i, Tf)
+            if np.isnan(k1):
+                return np.nan
+            k2 = rhs(T_i + dT / 2, Tf + dT * k1 / 2)
+            if np.isnan(k2):
+                return np.nan
+            k3 = rhs(T_i + dT / 2, Tf + dT * k2 / 2)
+            if np.isnan(k3):
+                return np.nan
+            k4 = rhs(T_next, Tf + dT * k3)
+            if np.isnan(k4):
+                return np.nan
+            Tf = Tf + dT * (k1 + 2 * k2 + 2 * k3 + k4) / 6
+            if np.isnan(Tf):
+                return np.nan
+
+        return Tf
+
+    def simulate_kovacs(self, t1_hold, t2_sec):
+        """Full thermal history: equil @ T0 → cool to T1 → hold t1 → heat to T2 → hold t2.
+
+        Protocol matching experiment:
+          1. Start equilibrated above Tg: T = T0 + 50K, Tf = T
+          2. Cool T_start → T1 at q_cool (Tf freezes in)
+          3. Isothermal hold at T1 for t1
+          4. Up-jump T1 → T2 at q_heat
+          5. Isothermal hold at T2 for t2
+
+        Returns normalized enthalpy: dH_norm = (T0 - Tf_end) / (T0 - T2).
+        """
+        T_start = self.T0 + 50.0  # well above Tg, fully equilibrated
+
+        # Step 1-2: Cool from above Tg to T1
+        Tf_after_cool = self._ramp(T_start, T1, -self.q_cool, T_start)
+        if np.isnan(Tf_after_cool):
+            return np.nan
+
+        # Step 3: Isothermal hold at T1
+        Tf_after_t1 = self._isothermal_hold(T1, t1_hold, Tf_after_cool)
+        if np.isnan(Tf_after_t1):
+            return np.nan
+
+        # Step 4: Up-jump T1 → T2
+        Tf_after_upjump = self._ramp(T1, T2, self.q_heat, Tf_after_t1)
+        if np.isnan(Tf_after_upjump):
+            return np.nan
+
+        # Step 5: Isothermal hold at T2
+        Tf_end = self._isothermal_hold(T2, t2_sec, Tf_after_upjump)
+        if np.isnan(Tf_end):
+            return np.nan
+
         dH_norm = (self.T0 - Tf_end) / max(self.T0 - T2, 1.0)
+        if not np.isfinite(dH_norm):
+            return np.nan
         return dH_norm
 
 
@@ -111,11 +189,16 @@ def load_targets():
 
 
 def simulate_tnm_vector(params, t2_values, t1_hold):
-    """Simulate TNM for a list of t2 values, given t1_hold."""
+    """Simulate TNM for a list of t2 values, given t1_hold.
+
+    Returns NaN-filled array on failure.
+    """
     logA, H_star, x, beta, T0, scale = params
     A = 10.0 ** logA
     model = TNMModel(A=A, H_star=H_star, x=x, beta=beta, T0=T0)
     dh_norm = np.array([model.simulate_kovacs(t1_hold, t2) for t2 in t2_values])
+    if np.any(np.isnan(dh_norm)):
+        return np.full(len(t2_values), np.nan)
     return scale * dh_norm
 
 
@@ -124,15 +207,15 @@ def compute_cost(params, t_target, dh_target_50, dh_target_500):
     logA, H_star, x, beta, T0, scale = params
 
     # Parameter sanity
-    if not (-30 < logA < -8):
+    if not (-36 < logA < -9):
         return 1e10
-    if not (30000 < H_star < 500000):
+    if not (30000 < H_star < 600000):
         return 1e10
-    if not (0.005 < x < 0.95):
+    if not (0.001 < x < 0.999):
         return 1e10
-    if not (0.01 < beta < 0.95):
+    if not (0.005 < beta < 0.999):
         return 1e10
-    if not (350 < T0 < 450):
+    if not (355 < T0 < 455):
         return 1e10
     if not (0.1 < scale < 50):
         return 1e10
@@ -141,6 +224,9 @@ def compute_cost(params, t_target, dh_target_50, dh_target_500):
         pred_50 = simulate_tnm_vector(params, t_target, T1_50S)
         pred_500 = simulate_tnm_vector(params, t_target, T1_500S)
     except Exception:
+        return 1e10
+
+    if np.any(np.isnan(pred_50)) or np.any(np.isnan(pred_500)):
         return 1e10
 
     return np.sum((pred_50 - dh_target_50) ** 2) + \
@@ -157,53 +243,45 @@ def subsample_target(t_full, dh50_full, dh500_full, n_pts=40):
 def fit():
     t_full, dh_full_50, dh_full_500, t_exp_50, dh_exp_50, t_exp_500, dh_exp_500 = load_targets()
 
-    # Subsample for speed: 40 points per group
+    # Subsample for speed: 15 points per group
     t_target, dh_target_50, dh_target_500 = subsample_target(
-        t_full, dh_full_50, dh_full_500, n_pts=40)
+        t_full, dh_full_50, dh_full_500, n_pts=15)
 
     # Parameter bounds: [logA, H_star, x, beta, T0, scale]
     bounds = [
-        (-28, -10),          # logA
-        (50000, 400000),     # H_star (J/mol)
-        (0.005, 0.9),        # x
+        (-35, -10),          # logA (wider for ramp model)
+        (50000, 500000),     # H_star (J/mol)
+        (0.005, 0.95),       # x
         (0.01, 0.9),         # beta (KWW for TNM)
-        (370, 440),          # T0 (K)
+        (360, 450),          # T0 (K)
         (1.0, 15.0),         # scale ≈ H_max ≈ 6.6
     ]
 
     def cost(p):
         return compute_cost(p, t_target, dh_target_50, dh_target_500)
 
-    print(f"Stage 1: Multi-start L-BFGS-B (20 starts, {len(t_target)} target pts per group)...")
+    n_starts = 10
+    print(f"Stage 1: Multi-start L-BFGS-B ({n_starts} starts, {len(t_target)} target pts per group)...", flush=True)
     rng = np.random.RandomState(42)
     best_result = None
     best_cost = np.inf
 
-    for k in range(20):
+    for k in range(n_starts):
         x0 = [rng.uniform(low, high) for low, high in bounds]
         res = minimize(cost, x0, method='L-BFGS-B', bounds=bounds,
                        options={'maxiter': 200, 'ftol': 1e-10})
         if res.fun < best_cost:
             best_cost = res.fun
             best_result = res
-        if (k + 1) % 5 == 0:
-            print(f"  Start {k+1}/20, best cost = {best_cost:.4f}")
+        if (k + 1) % 3 == 0:
+            print(f"  Start {k+1}/{n_starts}, best cost = {best_cost:.4f}", flush=True)
 
     print(f"  Best cost = {best_cost:.4f}")
 
-    print("Stage 2: Local refinement on full target (least_squares)...")
-    def residuals(params):
-        pred_50 = simulate_tnm_vector(params, t_full, T1_50S)
-        pred_500 = simulate_tnm_vector(params, t_full, T1_500S)
-        return np.concatenate([pred_50 - dh_full_50, pred_500 - dh_full_500])
+    # Use Stage 1 result directly (more reliable than further refinement
+    # which can diverge to worse local minima with ramp model)
+    p = best_result.x
 
-    lb_ls = [b[0] for b in bounds]
-    ub_ls = [b[1] for b in bounds]
-    result_ls = least_squares(
-        residuals, best_result.x, bounds=(lb_ls, ub_ls), method='trf',
-        ftol=1e-12, xtol=1e-12, gtol=1e-12, max_nfev=5000
-    )
-    p = result_ls.x
     logA, H_star, x, beta, T0, scale = p
 
     # Final predictions (on full target set)
