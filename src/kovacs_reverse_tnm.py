@@ -4,21 +4,20 @@ Reverse-engineer TNM model parameters from the phenomenological Kovacs fit.
 
 Strategy:
   1. Load the phenomenological KWW curve (kovacs_phenom_curve.csv)
-  2. Densely sample both groups (50s and 500s T1_hold) as target
-  3. Optimize TNM parameters (logA, H_star, x, beta, T0, scale) to match
-  4. Compare TNM simulation vs phenom curve vs experimental data
+  2. Optimize TNM parameters (logA, H_star, x, beta, T0, scale) to match
+  3. Compare TNM simulation vs phenom curve vs experimental data
+
+Uses instantaneous-quench TNM — standard in literature for isothermal
+annealing / Kovacs fitting (see D'Amore 2006, Grassi 2018).
 """
 
 import os
-import warnings
 import numpy as np
 import pandas as pd
-from scipy.optimize import minimize, least_squares
+from scipy.optimize import minimize
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-
-warnings.filterwarnings('ignore')
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RESULTS_DIR = os.path.join(ROOT, 'results')
@@ -30,169 +29,75 @@ T1 = 80.0 + 273.15   # 353.15 K
 T2 = 90.0 + 273.15   # 363.15 K
 
 # T1 hold times
-T1_50S = 49.98    # seconds
-T1_500S = 499.98  # seconds
-
-# Known from phenom fit: H_max ≈ 6.62 J/g
-# At full equilibrium (Tf=T2): dH_norm=1, so scale = H_max
-H_MAX_KNOWN = 6.6183
+T1_50S = 49.98
+T1_500S = 499.98
 
 
 class TNMModel:
-    """TNM model with finite cooling/heating ramps — physically correct Kovacs."""
+    """TNM model — instantaneous quench + isothermal KWW relaxation.
 
-    def __init__(self, A, H_star, x, beta, T0, q_cool=1.0, q_heat=1.0):
-        """q_cool, q_heat in K/s (60 K/min = 1.0 K/s)."""
+    Standard approach: freeze-in during cooling is absorbed into T0.
+    Literature: D'Amore (2006) for PS gives x≈0.9, β≈0.27.
+    """
+
+    def __init__(self, A, H_star, x, beta, T0):
         self.A = A
         self.H_star = H_star
         self.x = x
         self.beta = beta
         self.T0 = T0
-        self.q_cool = q_cool
-        self.q_heat = q_heat
 
     def tau(self, T, Tf):
         exponent = (self.x * self.H_star) / (R_GAS * T) + \
                    ((1 - self.x) * self.H_star) / (R_GAS * Tf)
-        # Cap exponent to prevent overflow in exp()
         exponent = np.clip(exponent, -50, 80)
         return self.A * np.exp(exponent)
 
     def _isothermal_hold(self, T_hold, t_hold, T_f_start):
-        """Isothermal KWW relaxation. Returns T_f_end."""
         if t_hold <= 0:
             return T_f_start
-
-        if t_hold < 0.1:
-            n_steps = 5
-            t_steps = np.linspace(0, t_hold, n_steps + 1)[1:]
-        else:
-            n_steps = 8
-            t_steps = np.logspace(np.log10(t_hold / 50),
-                                  np.log10(t_hold), n_steps)
-            t_steps = np.unique(np.round(t_steps, 10))
+        n_steps = 12
+        t_steps = np.logspace(np.log10(t_hold / 100),
+                              np.log10(t_hold), n_steps)
+        t_steps = np.unique(np.round(t_steps, 10))
 
         S = 0.0
         Tf = T_f_start
         t_prev = 0.0
-
         for t_i in t_steps:
             tau_val = self.tau(T_hold, Tf)
             dt = t_i - t_prev
             t_prev = t_i
             S += dt / tau_val
             Tf = T_hold + (T_f_start - T_hold) * np.exp(-(S ** self.beta))
-
-        return Tf
-
-    def _ramp(self, T_start, T_end, rate, Tf_start):
-        """Integrate Tool eqn dTf/dT = (T - Tf) / (rate * tau) along a ramp.
-
-        Uses RK4 with adaptive step. Returns Tf_end or NaN on failure.
-        """
-        dT_sign = 1 if T_end > T_start else -1
-        T_range = abs(T_end - T_start)
-        n_steps = max(int(T_range / 2.0), 6)
-
-        T_vals = np.linspace(T_start, T_end, n_steps + 1)
-        Tf = Tf_start
-
-        for i in range(n_steps):
-            T_i = T_vals[i]
-            T_next = T_vals[i + 1]
-            dT = T_next - T_i
-
-            def rhs(T, Tf_val):
-                tau_val = self.tau(T, Tf_val)
-                if tau_val <= 0 or not np.isfinite(tau_val):
-                    return np.nan
-                return (T - Tf_val) / (rate * tau_val)
-
-            k1 = rhs(T_i, Tf)
-            if np.isnan(k1):
-                return np.nan
-            k2 = rhs(T_i + dT / 2, Tf + dT * k1 / 2)
-            if np.isnan(k2):
-                return np.nan
-            k3 = rhs(T_i + dT / 2, Tf + dT * k2 / 2)
-            if np.isnan(k3):
-                return np.nan
-            k4 = rhs(T_next, Tf + dT * k3)
-            if np.isnan(k4):
-                return np.nan
-            Tf = Tf + dT * (k1 + 2 * k2 + 2 * k3 + k4) / 6
-            if np.isnan(Tf):
-                return np.nan
-
         return Tf
 
     def simulate_kovacs(self, t1_hold, t2_sec):
-        """Full thermal history: equil @ T0 → cool to T1 → hold t1 → heat to T2 → hold t2.
-
-        Protocol matching experiment:
-          1. Start equilibrated above Tg: T = T0 + 50K, Tf = T
-          2. Cool T_start → T1 at q_cool (Tf freezes in)
-          3. Isothermal hold at T1 for t1
-          4. Up-jump T1 → T2 at q_heat
-          5. Isothermal hold at T2 for t2
-
-        Returns normalized enthalpy: dH_norm = (T0 - Tf_end) / (T0 - T2).
-        """
-        T_start = self.T0 + 50.0  # well above Tg, fully equilibrated
-
-        # Step 1-2: Cool from above Tg to T1
-        Tf_after_cool = self._ramp(T_start, T1, -self.q_cool, T_start)
-        if np.isnan(Tf_after_cool):
-            return np.nan
-
-        # Step 3: Isothermal hold at T1
-        Tf_after_t1 = self._isothermal_hold(T1, t1_hold, Tf_after_cool)
-        if np.isnan(Tf_after_t1):
-            return np.nan
-
-        # Step 4: Up-jump T1 → T2
-        Tf_after_upjump = self._ramp(T1, T2, self.q_heat, Tf_after_t1)
-        if np.isnan(Tf_after_upjump):
-            return np.nan
-
-        # Step 5: Isothermal hold at T2
-        Tf_end = self._isothermal_hold(T2, t2_sec, Tf_after_upjump)
-        if np.isnan(Tf_end):
-            return np.nan
-
+        """Kovacs up-jump: quench T0→T1, hold t1, quench T1→T2, hold t2."""
+        Tf_after_t1 = self._isothermal_hold(T1, t1_hold, self.T0)
+        Tf_end = self._isothermal_hold(T2, t2_sec, Tf_after_t1)
         dH_norm = (self.T0 - Tf_end) / max(self.T0 - T2, 1.0)
-        if not np.isfinite(dH_norm):
-            return np.nan
-        return dH_norm
+        return np.clip(dH_norm, -1.0, 2.0)
 
 
 def load_targets():
-    """Load phenomenological curve and experimental data."""
-    # Phenomenological target
     curve_path = os.path.join(RESULTS_DIR, 'kovacs_phenom_curve.csv')
     df_curve = pd.read_csv(curve_path)
     t_target = df_curve['t_s'].values
     dh_target_50 = df_curve['dh_50s_Jg'].values
     dh_target_500 = df_curve['dh_500s_Jg'].values
 
-    # Experimental data (for comparison only)
     exp_path = os.path.join(RESULTS_DIR, 'enthalpy', 'enthalpy_kovacs.csv')
     df_exp = pd.read_csv(exp_path)
     grp_50 = df_exp[df_exp['T1_group'] == '50s']
     grp_500 = df_exp[df_exp['T1_group'] == '500s']
 
-    return (
-        t_target, dh_target_50, dh_target_500,
-        grp_50['T2_hold_s'].values, grp_50['delta_H_J_per_g'].values,
-        grp_500['T2_hold_s'].values, grp_500['delta_H_J_per_g'].values,
-    )
+    return (t_target, dh_target_50, dh_target_500,
+            grp_50['T2_hold_s'].values, grp_50['delta_H_J_per_g'].values,
+            grp_500['T2_hold_s'].values, grp_500['delta_H_J_per_g'].values)
 
 
 def simulate_tnm_vector(params, t2_values, t1_hold):
-    """Simulate TNM for a list of t2 values, given t1_hold.
-
-    Returns NaN-filled array on failure.
-    """
     logA, H_star, x, beta, T0, scale = params
     A = 10.0 ** logA
     model = TNMModel(A=A, H_star=H_star, x=x, beta=beta, T0=T0)
@@ -202,23 +107,20 @@ def simulate_tnm_vector(params, t2_values, t1_hold):
     return scale * dh_norm
 
 
-def compute_cost(params, t_target, dh_target_50, dh_target_500):
-    """Sum of squared residuals against phenomenological target."""
-    logA, H_star, x, beta, T0, scale = params
+def subsample_target(t_full, dh50_full, dh500_full, n_pts=40):
+    idx = np.logspace(0, np.log10(len(t_full) - 1), n_pts).astype(int)
+    idx = np.unique(np.clip(idx, 0, len(t_full) - 1))
+    return t_full[idx], dh50_full[idx], dh500_full[idx]
 
-    # Parameter sanity
-    if not (-36 < logA < -9):
-        return 1e10
-    if not (30000 < H_star < 600000):
-        return 1e10
-    if not (0.001 < x < 0.999):
-        return 1e10
-    if not (0.005 < beta < 0.999):
-        return 1e10
-    if not (355 < T0 < 455):
-        return 1e10
-    if not (0.1 < scale < 50):
-        return 1e10
+
+def compute_cost(params, t_target, dh_target_50, dh_target_500):
+    logA, H_star, x, beta, T0, scale = params
+    if not (-36 < logA < -8): return 1e10
+    if not (50000 < H_star < 600000): return 1e10
+    if not (0.05 < x < 0.99): return 1e10
+    if not (0.05 < beta < 0.8): return 1e10
+    if not (370 < T0 < 430): return 1e10
+    if not (0.5 < scale < 20): return 1e10
 
     try:
         pred_50 = simulate_tnm_vector(params, t_target, T1_50S)
@@ -233,35 +135,29 @@ def compute_cost(params, t_target, dh_target_50, dh_target_500):
            np.sum((pred_500 - dh_target_500) ** 2)
 
 
-def subsample_target(t_full, dh50_full, dh500_full, n_pts=40):
-    """Subsample the dense target curve for faster fitting."""
-    idx = np.logspace(0, np.log10(len(t_full) - 1), n_pts).astype(int)
-    idx = np.unique(np.clip(idx, 0, len(t_full) - 1))
-    return t_full[idx], dh50_full[idx], dh500_full[idx]
-
-
 def fit():
     t_full, dh_full_50, dh_full_500, t_exp_50, dh_exp_50, t_exp_500, dh_exp_500 = load_targets()
 
-    # Subsample for speed: 15 points per group
+    # Subsample for speed
     t_target, dh_target_50, dh_target_500 = subsample_target(
-        t_full, dh_full_50, dh_full_500, n_pts=15)
+        t_full, dh_full_50, dh_full_500, n_pts=30)
 
-    # Parameter bounds: [logA, H_star, x, beta, T0, scale]
+    # [logA, H_star, x, beta, T0, scale]
+    # Physically-motivated bounds for PS (see D'Amore 2006, Tropin 2015)
     bounds = [
-        (-35, -10),          # logA (wider for ramp model)
-        (50000, 500000),     # H_star (J/mol)
-        (0.005, 0.95),       # x
-        (0.01, 0.9),         # beta (KWW for TNM)
-        (360, 450),          # T0 (K)
-        (1.0, 15.0),         # scale ≈ H_max ≈ 6.6
+        (-35, -10),         # logA
+        (80000, 350000),    # H_star (J/mol)
+        (0.1, 0.95),        # x
+        (0.1, 0.7),         # beta (stretched: 0.2-0.6 typical for polymers)
+        (375, 420),         # T0 (Tg_PS ≈ 373K, T0 slightly above)
+        (1.0, 15.0),        # scale
     ]
 
     def cost(p):
         return compute_cost(p, t_target, dh_target_50, dh_target_500)
 
-    n_starts = 10
-    print(f"Stage 1: Multi-start L-BFGS-B ({n_starts} starts, {len(t_target)} target pts per group)...", flush=True)
+    n_starts = 40
+    print(f"Multi-start L-BFGS-B ({n_starts} starts, {len(t_target)} pts/group)...")
     rng = np.random.RandomState(42)
     best_result = None
     best_cost = np.inf
@@ -269,139 +165,145 @@ def fit():
     for k in range(n_starts):
         x0 = [rng.uniform(low, high) for low, high in bounds]
         res = minimize(cost, x0, method='L-BFGS-B', bounds=bounds,
-                       options={'maxiter': 200, 'ftol': 1e-10})
+                       options={'maxiter': 300, 'ftol': 1e-12})
         if res.fun < best_cost:
             best_cost = res.fun
             best_result = res
-        if (k + 1) % 3 == 0:
-            print(f"  Start {k+1}/{n_starts}, best cost = {best_cost:.4f}", flush=True)
+        if (k + 1) % 10 == 0:
+            print(f"  Start {k+1}/{n_starts}, best cost = {best_cost:.4f}")
 
-    print(f"  Best cost = {best_cost:.4f}")
-
-    # Use Stage 1 result directly (more reliable than further refinement
-    # which can diverge to worse local minima with ramp model)
+    print(f"  Final best cost = {best_cost:.4f}")
     p = best_result.x
-
     logA, H_star, x, beta, T0, scale = p
 
-    # Final predictions (on full target set)
+    # Final predictions
     pred_50 = simulate_tnm_vector(p, t_full, T1_50S)
     pred_500 = simulate_tnm_vector(p, t_full, T1_500S)
     pred_exp_50 = simulate_tnm_vector(p, t_exp_50, T1_50S)
     pred_exp_500 = simulate_tnm_vector(p, t_exp_500, T1_500S)
 
-    residuals_all = np.concatenate([pred_50 - dh_full_50, pred_500 - dh_full_500])
-    rmse = np.sqrt(np.mean(residuals_all ** 2))
+    residual_all = np.concatenate([pred_50 - dh_full_50, pred_500 - dh_full_500])
+    rmse = np.sqrt(np.mean(residual_all ** 2))
 
-    # R-squared vs phenom curve
-    ss_res_50 = np.sum((pred_50 - dh_full_50) ** 2)
-    ss_tot_50 = np.sum((dh_full_50 - np.mean(dh_full_50)) ** 2)
-    r2_50_phenom = 1 - ss_res_50 / ss_tot_50
-    ss_res_500 = np.sum((pred_500 - dh_full_500) ** 2)
-    ss_tot_500 = np.sum((dh_full_500 - np.mean(dh_full_500)) ** 2)
-    r2_500_phenom = 1 - ss_res_500 / ss_tot_500
+    # R² vs phenom
+    ssr50 = np.sum((pred_50 - dh_full_50)**2)
+    sst50 = np.sum((dh_full_50 - np.mean(dh_full_50))**2)
+    r2_50p = 1 - ssr50 / sst50
+    ssr500 = np.sum((pred_500 - dh_full_500)**2)
+    sst500 = np.sum((dh_full_500 - np.mean(dh_full_500))**2)
+    r2_500p = 1 - ssr500 / sst500
 
-    # R-squared vs experiment
-    ss_res_50e = np.sum((pred_exp_50 - dh_exp_50) ** 2)
-    ss_tot_50e = np.sum((dh_exp_50 - np.mean(dh_exp_50)) ** 2)
-    r2_50_exp = 1 - ss_res_50e / ss_tot_50e
-    ss_res_500e = np.sum((pred_exp_500 - dh_exp_500) ** 2)
-    ss_tot_500e = np.sum((dh_exp_500 - np.mean(dh_exp_500)) ** 2)
-    r2_500_exp = 1 - ss_res_500e / ss_tot_500e
+    # R² vs experiment
+    ssr50e = np.sum((pred_exp_50 - dh_exp_50)**2)
+    sst50e = np.sum((dh_exp_50 - np.mean(dh_exp_50))**2)
+    r2_50e = 1 - ssr50e / sst50e
+    ssr500e = np.sum((pred_exp_500 - dh_exp_500)**2)
+    sst500e = np.sum((dh_exp_500 - np.mean(dh_exp_500))**2)
+    r2_500e = 1 - ssr500e / sst500e
 
-    # Report
-    print("\n" + "=" * 65)
-    print("TNM REVERSE-ENGINEERING REPORT")
-    print("=" * 65)
-    print(f"  logA      = {logA:.4f}")
-    print(f"  A         = {10**logA:.4e} s")
-    print(f"  H*        = {H_star/1000:.2f} kJ/mol")
-    print(f"  x         = {x:.4f}")
-    print(f"  beta      = {beta:.4f}")
-    print(f"  T0        = {T0:.2f} K  ({T0-273.15:.1f} °C)")
-    print(f"  scale     = {scale:.4f} J/g")
+    # ── Report ──
+    print()
+    print("=" * 60)
+    print("TNM REVERSE-ENGINEERING (instantaneous quench)")
+    print("=" * 60)
+    print(f"  logA     = {logA:.4f}")
+    print(f"  A        = {10**logA:.4e} s")
+    print(f"  H*       = {H_star/1000:.2f} kJ/mol")
+    print(f"  x        = {x:.4f}")
+    print(f"  beta     = {beta:.4f}")
+    print(f"  T0       = {T0:.2f} K  ({T0-273.15:.1f} °C)")
+    print(f"  scale    = {scale:.4f} J/g")
     print(f"  RMSE vs phenom = {rmse:.4f} J/g")
-    print(f"  R² vs phenom (50s)  = {r2_50_phenom:.4f}")
-    print(f"  R² vs phenom (500s) = {r2_500_phenom:.4f}")
-    print(f"  R² vs exp    (50s)  = {r2_50_exp:.4f}")
-    print(f"  R² vs exp    (500s) = {r2_500_exp:.4f}")
+    print(f"  R² vs phenom   = 50s:{r2_50p:.4f}  500s:{r2_500p:.4f}")
+    print(f"  R² vs exp      = 50s:{r2_50e:.4f}  500s:{r2_500e:.4f}")
 
-    # Comparison table at experimental points
-    print(f"\n  {'t(s)':>8s}  {'Exp50s':>8s}  {'TNM50s':>8s}  {'Phen50s':>8s}  |  {'Exp500s':>8s}  {'TNM500s':>8s}  {'Phen500s':>8s}")
-    print("  " + "-" * 88)
-    phenom_exp_50 = np.interp(t_exp_50, t_full, dh_full_50)
-    phenom_exp_500 = np.interp(t_exp_500, t_full, dh_full_500)
+    print(f"\n  {'t(s)':>8s}  {'Exp50s':>8s}  {'TNM_50':>8s}  {'Phe_50':>8s}  |  {'Exp500s':>8s}  {'TNM500':>8s}  {'Phe500':>8s}")
+    print("  " + "-" * 82)
+    ph50 = np.interp(t_exp_50, t_full, dh_full_50)
+    ph500 = np.interp(t_exp_500, t_full, dh_full_500)
     for i in range(10):
-        print(f"  {t_exp_50[i]:8.3f}  {dh_exp_50[i]:8.4f}  {pred_exp_50[i]:8.4f}  {phenom_exp_50[i]:8.4f}  |  "
-              f"{dh_exp_500[i]:8.4f}  {pred_exp_500[i]:8.4f}  {phenom_exp_500[i]:8.4f}")
+        print(f"  {t_exp_50[i]:8.3f}  {dh_exp_50[i]:8.4f}  {pred_exp_50[i]:8.4f}  {ph50[i]:8.4f}  |  "
+              f"{dh_exp_500[i]:8.4f}  {pred_exp_500[i]:8.4f}  {ph500[i]:8.4f}")
 
-    # Extrapolation
-    print(f"\n  --- TNM Extrapolation ---")
-    print(f"  {'t(s)':>10s}  {'TNM 50s':>9s}  {'TNM 500s':>9s}  {'diff':>8s}  {'Phen diff':>9s}")
+    print(f"\n  {'t(s)':>10s}  {'TNM_50':>9s}  {'TNM_500':>9s}  {'diff':>8s}  {'Phe_diff':>9s}")
     print("  " + "-" * 55)
     for t_ext in [1000, 2000, 5000, 10000, 50000, 100000]:
-        v50_tnm = simulate_tnm_vector(p, [t_ext], T1_50S)[0]
-        v500_tnm = simulate_tnm_vector(p, [t_ext], T1_500S)[0]
-        v50_phe = np.interp(t_ext, t_full, dh_full_50)
-        v500_phe = np.interp(t_ext, t_full, dh_full_500)
-        print(f"  {t_ext:10.0f}  {v50_tnm:9.4f}  {v500_tnm:9.4f}  {v500_tnm-v50_tnm:8.4f}  {v500_phe-v50_phe:9.4f}")
+        v50t = simulate_tnm_vector(p, [t_ext], T1_50S)[0]
+        v500t = simulate_tnm_vector(p, [t_ext], T1_500S)[0]
+        v50p = np.interp(t_ext, t_full, dh_full_50)
+        v500p = np.interp(t_ext, t_full, dh_full_500)
+        print(f"  {t_ext:10.0f}  {v50t:9.4f}  {v500t:9.4f}  {v500t-v50t:8.4f}  {v500p-v50p:9.4f}")
 
-    # Save results
+    # Save
     os.makedirs(os.path.join(RESULTS_DIR, 'tnm'), exist_ok=True)
-    tnm_params_df = pd.DataFrame([{
+    df_params = pd.DataFrame([{
         'logA': logA, 'A_s': 10**logA, 'H_star_Jmol': H_star,
         'H_star_kJmol': H_star/1000, 'x': x, 'beta': beta,
         'T0_K': T0, 'T0_C': T0 - 273.15, 'scale_Jg': scale,
         'rmse_phenom': rmse,
-        'r2_50s_phenom': r2_50_phenom, 'r2_500s_phenom': r2_500_phenom,
-        'r2_50s_exp': r2_50_exp, 'r2_500s_exp': r2_500_exp,
+        'r2_50s_phenom': r2_50p, 'r2_500s_phenom': r2_500p,
+        'r2_50s_exp': r2_50e, 'r2_500s_exp': r2_500e,
     }])
-    tnm_params_df.to_csv(os.path.join(RESULTS_DIR, 'tnm', 'tnm_reverse_params.csv'), index=False)
-    print(f"\n  Parameters saved to results/tnm/tnm_reverse_params.csv")
+    df_params.to_csv(os.path.join(RESULTS_DIR, 'tnm', 'tnm_reverse_params.csv'), index=False)
 
-    # ---- Plot ----
+    # ── 3-way comparison plot ──
     fig, axes = plt.subplots(1, 2, figsize=(16, 6.5))
 
-    # Left panel: full comparison
+    # Left: semilog
     ax = axes[0]
     t_plot = np.logspace(-1, 6, 600)
-    dh_phe_50_plot = np.interp(t_plot, t_full, dh_full_50)
-    dh_phe_500_plot = np.interp(t_plot, t_full, dh_full_500)
-    dh_tnm_50_plot = simulate_tnm_vector(p, t_plot, T1_50S)
-    dh_tnm_500_plot = simulate_tnm_vector(p, t_plot, T1_500S)
+    dh_ph50 = np.interp(t_plot, t_full, dh_full_50)
+    dh_ph500 = np.interp(t_plot, t_full, dh_full_500)
+    dh_t50 = simulate_tnm_vector(p, t_plot, T1_50S)
+    dh_t500 = simulate_tnm_vector(p, t_plot, T1_500S)
 
-    ax.semilogx(t_plot, dh_phe_50_plot, 'C0--', linewidth=1.5, alpha=0.5, label='Phenom 50s')
-    ax.semilogx(t_plot, dh_phe_500_plot, 'C1--', linewidth=1.5, alpha=0.5, label='Phenom 500s')
-    ax.semilogx(t_plot, dh_tnm_50_plot, 'C0-', linewidth=2, label='TNM 50s')
-    ax.semilogx(t_plot, dh_tnm_500_plot, 'C1-', linewidth=2, label='TNM 500s')
-    ax.scatter(t_exp_50, dh_exp_50, c='C0', marker='o', s=50, zorder=5, edgecolors='k', linewidth=0.5, label='Exp 50s')
-    ax.scatter(t_exp_500, dh_exp_500, c='C1', marker='s', s=50, zorder=5, edgecolors='k', linewidth=0.5, label='Exp 500s')
-    ax.axvline(x=1000, color='gray', linestyle='--', alpha=0.4)
+    ax.semilogx(t_plot, dh_ph50, 'C0--', lw=1.5, alpha=0.5, label='Phenom 50s')
+    ax.semilogx(t_plot, dh_ph500, 'C1--', lw=1.5, alpha=0.5, label='Phenom 500s')
+    ax.semilogx(t_plot, dh_t50, 'C0-', lw=2, label='TNM 50s')
+    ax.semilogx(t_plot, dh_t500, 'C1-', lw=2, label='TNM 500s')
+    ax.scatter(t_exp_50, dh_exp_50, c='C0', marker='o', s=50, zorder=5,
+               edgecolors='k', linewidth=0.5, label='Exp 50s')
+    ax.scatter(t_exp_500, dh_exp_500, c='C1', marker='s', s=50, zorder=5,
+               edgecolors='k', linewidth=0.5, label='Exp 500s')
+    ax.axvline(x=1000, color='gray', ls='--', alpha=0.4)
     ax.set_xlabel('ln($t_2$) (s)')
-    ax.set_ylabel('$\\Delta H$ (J/g)')
-    ax.set_title(f'TNM vs Phenomenological vs Experiment\n'
-                 f'$R^2_{{\\rm exp}}$: 50s={r2_50_exp:.3f}, 500s={r2_500_exp:.3f}')
+    ax.set_ylabel(r'$\Delta H$ (J/g)')
+    ax.set_title(f'Kovacs Up-Jump (80°C→90°C): TNM (instant. quench) vs Phenom vs Exp\n'
+                 f'$R^2_{{\\rm exp}}$: 50s={r2_50e:.3f}, 500s={r2_500e:.3f}')
     ax.legend(fontsize=8, loc='lower right')
     ax.set_xlim(5e-2, 1e6)
     ax.grid(True, alpha=0.25)
 
-    # Right panel: parity plot
+    # Right: parity
     ax = axes[1]
-    all_tnm = np.concatenate([pred_exp_50, pred_exp_500])
-    all_exp = np.concatenate([dh_exp_50, dh_exp_500])
-    ax.scatter(all_exp, all_tnm, c='C3', alpha=0.7, s=40, zorder=5)
-    ax.plot([0, max(all_exp) * 1.05], [0, max(all_exp) * 1.05], 'k-', alpha=0.3)
-    ax.set_xlabel('Experimental $\\Delta H$ (J/g)')
-    ax.set_ylabel('TNM $\\Delta H$ (J/g)')
-    ax.set_title(f'Parity Plot\n$R^2$ = {np.corrcoef(all_exp, all_tnm)[0,1]**2:.3f}')
+    ax.scatter(dh_exp_50, pred_exp_50, c='C0', marker='o', s=45, zorder=5,
+               edgecolors='k', linewidth=0.3, label='50s')
+    ax.scatter(dh_exp_500, pred_exp_500, c='C1', marker='s', s=45, zorder=5,
+               edgecolors='k', linewidth=0.3, label='500s')
+    ax.plot([0, 7], [0, 7], 'k-', alpha=0.3)
+    ax.set_xlabel('Experimental ΔH (J/g)')
+    ax.set_ylabel('TNM ΔH (J/g)')
+    ax.set_title('Parity Plot')
+    ax.legend(fontsize=9)
     ax.grid(True, alpha=0.25)
-    ax.set_aspect('equal')
+
+    # Annotate parameters
+    textstr = (
+        f"logA = {logA:.2f}\n"
+        f"H* = {H_star/1000:.1f} kJ/mol\n"
+        f"x = {x:.3f}\n"
+        f"β = {beta:.3f}\n"
+        f"T0 = {T0:.1f} K"
+    )
+    ax.text(0.05, 0.95, textstr, transform=ax.transAxes, fontsize=9,
+            verticalalignment='top', family='monospace',
+            bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
 
     plt.tight_layout()
     plot_path = os.path.join(RESULTS_DIR, 'tnm', 'kovacs_reverse_tnm.png')
     plt.savefig(plot_path, dpi=150)
     plt.close()
-    print(f"  Plot saved to results/tnm/kovacs_reverse_tnm.png")
+    print(f"\n  Plot saved to results/tnm/kovacs_reverse_tnm.png")
 
     return p, rmse
 
