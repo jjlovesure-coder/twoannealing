@@ -1,26 +1,27 @@
 #!/usr/bin/env python3
 """
-Two-Step Down-Jump (90°C→80°C) — TNM Fit via Genetic Algorithm
+TNM Model Fitting via Genetic Algorithm
 
-Uses scipy's differential_evolution (evolutionary/genetic algorithm) for global
-optimization, followed by L-BFGS-B polish.  Compares against the existing
-multi-start L-BFGS-B approach to quantify the benefit of global search.
+Implements both:
+  1. A classical GA (tournament selection, BLX-α crossover, Gaussian mutation, elitism)
+  2. scipy's differential_evolution (evolutionary strategy)
+
+Compares against multi-start L-BFGS-B on both Two-Step and Kovacs experiments.
 """
 
 import os, time, numpy as np, pandas as pd
 from scipy.optimize import differential_evolution, minimize
 import matplotlib; matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-from matplotlib.lines import Line2D
-from matplotlib.patches import Rectangle, ConnectionPatch
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RESULTS = os.path.join(ROOT, 'results')
 R = 8.314
 
-T1, T2 = 363.15, 353.15
-T1_50S, T1_500S = 49.98, 499.98
 
+# ═════════════════════════════════════════════════════════════════════════════
+# TNM Model
+# ═════════════════════════════════════════════════════════════════════════════
 
 class TNM:
     """Instantaneous-quench TNM."""
@@ -42,128 +43,402 @@ class TNM:
             Tf = T + (Tf0 - T) * np.exp(-(S ** self.b))
         return Tf
 
-    def simulate(self, t1, t2):
+    def simulate(self, T1, T2, t1, t2):
         Tf1 = self._hold(T1, t1, self.T0)
         Tf2 = self._hold(T2, t2, Tf1)
         return np.clip((self.T0 - Tf2) / max(self.T0 - T2, 1.0), -1, 2)
 
 
-def load_data():
+def simulate_vector(params, t2s, t1h, T1, T2):
+    logA, H_star, x, beta, T0, scale = params
+    m = TNM(A=10**logA, H_star=H_star, x=x, beta=beta, T0=T0)
+    return scale * np.array([m.simulate(T1, T2, t1h, t) for t in t2s])
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Classical Genetic Algorithm
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _tournament_select(pop, fitness, k=3):
+    """Tournament selection: pick k random, return best."""
+    idx = np.random.choice(len(pop), k, replace=False)
+    return pop[idx[np.argmin(fitness[idx])]]
+
+
+def _blx_alpha_crossover(p1, p2, bounds, alpha=0.3):
+    """BLX-α crossover: blend with extension factor α."""
+    child = np.zeros(len(p1))
+    for i in range(len(p1)):
+        lo, hi = min(p1[i], p2[i]), max(p1[i], p2[i])
+        r = (hi - lo) * alpha
+        child[i] = np.clip(np.random.uniform(lo - r, hi + r), bounds[i][0], bounds[i][1])
+    return child
+
+
+def _gaussian_mutate(ind, bounds, prob=0.15, sigma_frac=0.04):
+    """Gaussian mutation: perturb each gene with prob, σ ∝ range."""
+    child = ind.copy()
+    for i in range(len(child)):
+        if np.random.random() < prob:
+            sigma = (bounds[i][1] - bounds[i][0]) * sigma_frac
+            child[i] = np.clip(child[i] + np.random.normal(0, sigma), bounds[i][0], bounds[i][1])
+    return child
+
+
+def classical_ga(cost_fn, bounds, pop_size=120, generations=400,
+                 crossover_prob=0.85, mutation_prob_init=0.25, elite_frac=0.08,
+                 n_islands=3, memetic_every=15, seed=42, verbose=True):
+    """
+    Memetic GA with:
+      - Island model (n_islands sub-populations, migration every 20 gen)
+      - Adaptive mutation (high→low over generations)
+      - DE-style differential mutation operator
+      - Memetic local search (L-BFGS-B polish on best individual periodically)
+      - Smart restart (reinitialize around best with controlled variance)
+
+    Returns best individual, best fitness, convergence history.
+    """
+    rng = np.random.RandomState(seed)
+    n_params = len(bounds)
+    lows = np.array([b[0] for b in bounds])
+    highs = np.array([b[1] for b in bounds])
+
+    island_size = pop_size // n_islands
+    elite_size = max(2, int(island_size * elite_frac))
+
+    # Initialize islands
+    islands = []
+    for _ in range(n_islands):
+        pop = rng.uniform(lows, highs, size=(island_size, n_params))
+        fitness = np.array([cost_fn(ind) for ind in pop])
+        islands.append({'pop': pop, 'fitness': fitness})
+
+    # Global best
+    all_fitness = np.concatenate([isln['fitness'] for isln in islands])
+    best_idx = np.argmin(all_fitness)
+    best_island = best_idx // island_size
+    best_local_idx = best_idx % island_size
+    best_fitness = all_fitness[best_idx]
+    best_ind = islands[best_island]['pop'][best_local_idx].copy()
+
+    history = [best_fitness]
+    stall = 0
+    nfe = pop_size  # function evaluations
+
+    for gen in range(generations):
+        # Adaptive mutation probability: decay from init to 0.03
+        mut_prob = mutation_prob_init * (0.12 / mutation_prob_init) ** (gen / generations) + 0.03
+        sigma_frac = 0.05 * (0.02 / 0.05) ** (gen / generations) + 0.005
+
+        # DE-style mutation probability: increases as Gaussian mutation weakens
+        de_prob = 0.3 * (gen / generations)
+
+        for idx in range(n_islands):
+            pop = islands[idx]['pop']
+            fitness = islands[idx]['fitness']
+
+            order = np.argsort(fitness)
+            elites = pop[order[:elite_size]].copy()
+            elite_fits = fitness[order[:elite_size]].copy()
+
+            new_pop = list(elites)
+            while len(new_pop) < island_size:
+                # Selection
+                p1_idx = np.argmin(fitness[rng.choice(island_size, 3, replace=False)])
+                p1 = pop[p1_idx]
+
+                if rng.random() < crossover_prob:
+                    p2_idx = np.argmin(fitness[rng.choice(island_size, 3, replace=False)])
+                    p2 = pop[p2_idx]
+
+                    if rng.random() < de_prob:
+                        # DE-style: child = p1 + F*(p2 - p3) + noise
+                        p3_idx = np.argmin(fitness[rng.choice(island_size, 3, replace=False)])
+                        p3 = pop[p3_idx]
+                        F = rng.uniform(0.3, 0.9)
+                        child = p1 + F * (p2 - p3)
+                        child = np.clip(child, lows, highs)
+                    else:
+                        child = _blx_alpha_crossover(p1, p2, bounds, alpha=0.3)
+                else:
+                    child = p1.copy()
+
+                child = _gaussian_mutate(child, bounds, prob=mut_prob, sigma_frac=sigma_frac)
+                new_pop.append(child)
+
+            islands[idx]['pop'] = np.array(new_pop[:island_size])
+            islands[idx]['fitness'] = np.array([cost_fn(ind) for ind in islands[idx]['pop']])
+            nfe += island_size
+
+        # Migration between islands (every 20 generations)
+        if gen > 0 and gen % 20 == 0:
+            for src in range(n_islands):
+                dst = (src + 1) % n_islands
+                src_pop = islands[src]['pop']
+                src_fit = islands[src]['fitness']
+                dst_pop = islands[dst]['pop']
+                dst_fit = islands[dst]['fitness']
+                # Send 2 best from src to dst
+                src_order = np.argsort(src_fit)
+                for rank in range(2):
+                    migrant = src_pop[src_order[rank]].copy()
+                    # Replace worst in dst
+                    dst_worst = np.argmax(dst_fit)
+                    dst_pop[dst_worst] = migrant
+                    dst_fit[dst_worst] = cost_fn(migrant)
+                    nfe += 1
+
+        # Find global best
+        cur_best = np.inf
+        cur_best_ind = None
+        for idx in range(n_islands):
+            mi = np.argmin(islands[idx]['fitness'])
+            if islands[idx]['fitness'][mi] < cur_best:
+                cur_best = islands[idx]['fitness'][mi]
+                cur_best_ind = islands[idx]['pop'][mi].copy()
+
+        history.append(cur_best)
+
+        if cur_best < best_fitness - 1e-12:
+            best_fitness = cur_best
+            best_ind = cur_best_ind.copy()
+            stall = 0
+        else:
+            stall += 1
+
+        # Memetic local search on global best
+        if memetic_every > 0 and gen % memetic_every == 0 and gen > 0:
+            try:
+                polish = minimize(cost_fn, best_ind, method='L-BFGS-B', bounds=bounds,
+                                  options={'maxiter': 80, 'ftol': 1e-12})
+                nfe += polish.nfev
+            except Exception:
+                polish = minimize(cost_fn, best_ind, method='L-BFGS-B', bounds=bounds,
+                                  options={'maxiter': 30})
+                nfe += polish.nfev
+            if polish.fun < best_fitness:
+                best_fitness = polish.fun
+                best_ind = polish.x.copy()
+                # Inject back into all islands
+                for idx in range(n_islands):
+                    worst_idx = np.argmax(islands[idx]['fitness'])
+                    islands[idx]['pop'][worst_idx] = best_ind.copy()
+                    islands[idx]['fitness'][worst_idx] = best_fitness
+                stall = 0
+
+        if verbose and (gen + 1) % 50 == 0:
+            print(f"    MemGA gen {gen+1:3d}/{generations}  best={best_fitness:.6f}  "
+                  f"mut={mut_prob:.3f}  nfe={nfe}", flush=True)
+
+        # Smart restart
+        if stall > 60:
+            if verbose:
+                print(f"    MemGA stalled at gen {gen+1}, smart restart (σ={sigma_frac:.4f})...", flush=True)
+            for idx in range(n_islands):
+                pop = islands[idx]['pop']
+                fit = islands[idx]['fitness']
+                order = np.argsort(fit)
+                # Keep top 15%
+                keep = max(3, island_size // 7)
+                # Reinitialize rest around best with decaying variance
+                sigma_vec = (highs - lows) * 0.2
+                for j in range(keep, island_size):
+                    pop[order[j]] = np.clip(
+                        best_ind + rng.normal(0, sigma_vec) * (0.5 + 0.5 * rng.random()),
+                        lows, highs)
+                islands[idx]['fitness'] = np.array([cost_fn(ind) for ind in pop])
+                nfe += island_size
+            stall = 0
+
+    return best_ind, best_fitness, np.array(history)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Data loading
+# ═════════════════════════════════════════════════════════════════════════════
+
+def load_twosteps_data():
+    """Two-Step down-jump (90°C→80°C)."""
     df = pd.read_csv(os.path.join(RESULTS, 'enthalpy', 'enthalpy_twosteps.csv'))
     g50 = df[df['T1_group'] == '50s']
     g500 = df[df['T1_group'] == '500s']
     return (g50['T2_hold_s'].values, g50['delta_H_J_per_g'].values,
-            g500['T2_hold_s'].values, g500['delta_H_J_per_g'].values)
+            g500['T2_hold_s'].values, g500['delta_H_J_per_g'].values,
+            363.15, 353.15, 49.98, 499.98)
 
 
-def simulate_vector(params, t2s, t1h):
-    logA, H_star, x, beta, T0, scale = params
-    m = TNM(A=10**logA, H_star=H_star, x=x, beta=beta, T0=T0)
-    return scale * np.array([m.simulate(t1h, t) for t in t2s])
+def load_kovacs_data():
+    """Kovacs up-jump (80°C→90°C)."""
+    df = pd.read_csv(os.path.join(RESULTS, 'enthalpy', 'enthalpy_kovacs.csv'))
+    g50 = df[df['T1_group'] == '50s']
+    g500 = df[df['T1_group'] == '500s']
+    return (g50['T2_hold_s'].values, g50['delta_H_J_per_g'].values,
+            g500['T2_hold_s'].values, g500['delta_H_J_per_g'].values,
+            353.15, 363.15, 49.98, 499.98)
 
 
-def cost_vector(params, t50, dh50, t500, dh500):
-    """Vectorized cost — returns float, safe for DE."""
-    logA, H_star, x, beta, T0, scale = params
-    try:
-        p50 = simulate_vector(params, t50, T1_50S)
-        p500 = simulate_vector(params, t500, T1_500S)
-    except Exception:
-        return 1e10
-    if np.any(~np.isfinite(p50)) or np.any(~np.isfinite(p500)):
-        return 1e10
-    return np.sum((p50 - dh50)**2) + np.sum((p500 - dh500)**2)
+def make_cost_and_bounds(t50, dh50, t500, dh500, T1, T2, t1_50s, t1_500s,
+                          scenario='kovacs'):
+    """Build cost function and bounds for a given experiment."""
 
-
-def fit():
-    t50, dh50, t500, dh500 = load_data()
-
-    bounds = [
-        (-35, -15),         # logA
-        (100000, 400000),   # H_star J/mol
-        (0.2, 0.99),        # x
-        (0.1, 0.99),        # beta
-        (380, 460),         # T0 K
-        (3, 10),            # scale J/g
-    ]
+    if scenario == 'kovacs':
+        bounds = [
+            (-36, -8),           # logA
+            (80000, 350000),     # H_star J/mol
+            (0.1, 0.95),         # x
+            (0.1, 0.7),          # beta
+            (375, 420),          # T0 K
+            (1.0, 15.0),         # scale J/g
+        ]
+    else:
+        bounds = [
+            (-35, -15),          # logA
+            (100000, 400000),    # H_star J/mol
+            (0.2, 0.99),         # x
+            (0.1, 0.99),         # beta
+            (380, 460),          # T0 K
+            (3, 10),             # scale J/g
+        ]
 
     def cost(p):
-        return cost_vector(p, t50, dh50, t500, dh500)
+        try:
+            pred_50 = simulate_vector(p, t50, t1_50s, T1, T2)
+            pred_500 = simulate_vector(p, t500, t1_500s, T1, T2)
+        except Exception:
+            return 1e10
+        if np.any(~np.isfinite(pred_50)) or np.any(~np.isfinite(pred_500)):
+            return 1e10
+        return np.sum((pred_50 - dh50)**2) + np.sum((pred_500 - dh500)**2)
 
-    # ── Stage 1: Global search via differential evolution ──
-    print("=" * 60)
-    print("TNM FIT — GENETIC ALGORITHM (Differential Evolution)")
-    print("=" * 60)
-    t0 = time.time()
+    return cost, bounds
 
-    de_result = differential_evolution(
-        cost, bounds,
-        seed=42,
-        maxiter=2000,
-        tol=1e-10,
-        popsize=25,            # 25×6 = 150 population members
-        mutation=(0.5, 1.2),   # dithering
-        recombination=0.9,
-        polish=False,           # polish separately for transparency
-        workers=1,
-        disp=True,
-    )
-    t_de = time.time() - t0
 
-    # ── Stage 2: Polish with L-BFGS-B ──
-    print(f"\n  GA best cost = {de_result.fun:.6f}  (took {t_de:.1f}s)")
-    print(f"  GA best params: logA={de_result.x[0]:.3f}  H*={de_result.x[1]/1000:.1f} kJ/mol  "
-          f"x={de_result.x[2]:.4f}  beta={de_result.x[3]:.4f}  T0={de_result.x[4]:.1f} K  scale={de_result.x[5]:.4f}")
-    print("  Polishing with L-BFGS-B...", flush=True)
+# ═════════════════════════════════════════════════════════════════════════════
+# Metrics
+# ═════════════════════════════════════════════════════════════════════════════
 
-    polish_result = minimize(cost, de_result.x, method='L-BFGS-B', bounds=bounds,
-                             options={'maxiter': 500, 'ftol': 1e-14})
-    t_polish = time.time() - t0 - t_de
-
-    best_p = polish_result.x
-    best_c = polish_result.fun
-    logA, H_star, x, beta, T0, scale = best_p
-
-    p50 = simulate_vector(best_p, t50, T1_50S)
-    p500 = simulate_vector(best_p, t500, T1_500S)
+def compute_metrics(params, t50, dh50, t500, dh500, T1, T2, t1_50s, t1_500s):
+    p50 = simulate_vector(params, t50, t1_50s, T1, T2)
+    p500 = simulate_vector(params, t500, t1_500s, T1, T2)
     rmse = np.sqrt(np.mean(np.concatenate([p50 - dh50, p500 - dh500])**2))
     r2_50 = 1 - np.sum((p50 - dh50)**2) / np.sum((dh50 - np.mean(dh50))**2)
     r2_500 = 1 - np.sum((p500 - dh500)**2) / np.sum((dh500 - np.mean(dh500))**2)
+    return rmse, r2_50, r2_500, p50, p500
 
-    # ── Comparison: multi-start L-BFGS-B ──
-    print(f"\n  Polish cost = {best_c:.6f}  (took {t_polish:.1f}s)")
-    print(f"  Running multi-start L-BFGS-B for comparison...", flush=True)
 
-    t1 = time.time()
+# ═════════════════════════════════════════════════════════════════════════════
+# Main fit
+# ═════════════════════════════════════════════════════════════════════════════
+
+def run_experiment(name, load_fn, scenario):
+    t50, dh50, t500, dh500, T1, T2, t1_50s, t1_500s = load_fn()
+    cost_fn, bounds = make_cost_and_bounds(t50, dh50, t500, dh500, T1, T2,
+                                            t1_50s, t1_500s, scenario)
+
+    print(f"\n{'='*70}")
+    print(f"  {name}")
+    print(f"  Data: {len(t50)} pts (50s) + {len(t500)} pts (500s)")
+    print(f"{'='*70}")
+
+    results = {}
+
+    # ── 1. Memetic GA ──
+    print(f"\n  [1/3] Memetic Genetic Algorithm (islands + DE mutation + local search)...")
+    t0 = time.time()
+    ga_ind, ga_cost, ga_history = classical_ga(
+        cost_fn, bounds, pop_size=180, generations=500,
+        crossover_prob=0.85, mutation_prob_init=0.30, elite_frac=0.08,
+        n_islands=3, memetic_every=15, seed=42)
+    t_ga = time.time() - t0
+
+    # Polish GA
+    ga_polish = minimize(cost_fn, ga_ind, method='L-BFGS-B', bounds=bounds,
+                         options={'maxiter': 500, 'ftol': 1e-14})
+    if ga_polish.fun < ga_cost:
+        ga_p = ga_polish.x
+        ga_cost = ga_polish.fun
+    else:
+        ga_p = ga_ind
+    ga_rmse, ga_r2_50, ga_r2_500, _, _ = compute_metrics(
+        ga_p, t50, dh50, t500, dh500, T1, T2, t1_50s, t1_500s)
+
+    print(f"    GA cost={ga_cost:.6f}  RMSE={ga_rmse:.4f}  R²50={ga_r2_50:.4f}  R²500={ga_r2_500:.4f}  ({t_ga:.0f}s)")
+    results['ga'] = {'params': ga_p, 'cost': ga_cost, 'rmse': ga_rmse,
+                     'r2_50': ga_r2_50, 'r2_500': ga_r2_500, 't': t_ga,
+                     'history': ga_history}
+
+    # ── 2. Differential Evolution ──
+    print(f"\n  [2/3] Differential Evolution (3 strategies)...")
+    t0 = time.time()
+    de_best_cost, de_best_p = np.inf, None
+    strategies = ['best1bin', 'rand1bin', 'best1exp']
+    for st in strategies:
+        try:
+            de_res = differential_evolution(
+                cost_fn, bounds, seed=42, maxiter=1000, tol=1e-10,
+                popsize=40, mutation=(0.5, 1.2), recombination=0.9,
+                strategy=st, polish=False, workers=1, disp=False)
+            if de_res.fun < de_best_cost:
+                de_best_cost, de_best_p = de_res.fun, de_res.x
+        except Exception:
+            pass
+
+    t_de = time.time() - t0
+
+    # Polish DE
+    de_polish = minimize(cost_fn, de_best_p, method='L-BFGS-B', bounds=bounds,
+                         options={'maxiter': 500, 'ftol': 1e-14})
+    if de_polish.fun < de_best_cost:
+        de_p = de_polish.x
+        de_cost = de_polish.fun
+    else:
+        de_p = de_best_p
+        de_cost = de_best_cost
+
+    de_rmse, de_r2_50, de_r2_500, _, _ = compute_metrics(
+        de_p, t50, dh50, t500, dh500, T1, T2, t1_50s, t1_500s)
+    print(f"    DE  cost={de_cost:.6f}  RMSE={de_rmse:.4f}  R²50={de_r2_50:.4f}  R²500={de_r2_500:.4f}  ({t_de:.0f}s)")
+    results['de'] = {'params': de_p, 'cost': de_cost, 'rmse': de_rmse,
+                     'r2_50': de_r2_50, 'r2_500': de_r2_500, 't': t_de}
+
+    # ── 3. Multi-start L-BFGS-B (baseline) ──
+    print(f"\n  [3/3] Multi-start L-BFGS-B (80 starts, baseline)...")
+    t0 = time.time()
     rng = np.random.RandomState(42)
     bfgs_best_c, bfgs_best_p = np.inf, None
-    for k in range(80):
+    n_starts = 80
+    for k in range(n_starts):
         x0 = [rng.uniform(low, high) for low, high in bounds]
-        r = minimize(cost, x0, method='L-BFGS-B', bounds=bounds,
+        r = minimize(cost_fn, x0, method='L-BFGS-B', bounds=bounds,
                      options={'maxiter': 400, 'ftol': 1e-14})
         if r.fun < bfgs_best_c:
             bfgs_best_c, bfgs_best_p = r.fun, r.x
-    t_bfgs = time.time() - t1
+    t_bfgs = time.time() - t0
 
-    p50_bfgs = simulate_vector(bfgs_best_p, t50, T1_50S)
-    p500_bfgs = simulate_vector(bfgs_best_p, t500, T1_500S)
-    rmse_bfgs = np.sqrt(np.mean(np.concatenate([p50_bfgs - dh50, p500_bfgs - dh500])**2))
-    r2_50_bfgs = 1 - np.sum((p50_bfgs - dh50)**2) / np.sum((dh50 - np.mean(dh50))**2)
-    r2_500_bfgs = 1 - np.sum((p500_bfgs - dh500)**2) / np.sum((dh500 - np.mean(dh500))**2)
+    bfgs_rmse, bfgs_r2_50, bfgs_r2_500, _, _ = compute_metrics(
+        bfgs_best_p, t50, dh50, t500, dh500, T1, T2, t1_50s, t1_500s)
+    print(f"    BFGS cost={bfgs_best_c:.6f}  RMSE={bfgs_rmse:.4f}  R²50={bfgs_r2_50:.4f}  R²500={bfgs_r2_500:.4f}  ({t_bfgs:.0f}s)")
+    results['bfgs'] = {'params': bfgs_best_p, 'cost': bfgs_best_c,
+                       'rmse': bfgs_rmse, 'r2_50': bfgs_r2_50,
+                       'r2_500': bfgs_r2_500, 't': t_bfgs}
 
-    # ── Report ──
-    print(f"\n{'='*60}")
-    print(f"GA + POLISH  vs  MULTI-START L-BFGS-B")
-    print(f"{'='*60}")
-    print(f"\n  {'':<14s} {'GA+Polish':>14s} {'Multi-Start':>14s} {'Winner':>10s}")
-    print(f"  {'-'*53}")
-    print(f"  {'Cost':<14s} {best_c:>14.6f} {bfgs_best_c:>14.6f} {'GA' if best_c < bfgs_best_c else 'BFGS':>10s}")
-    print(f"  {'RMSE':<14s} {rmse:>14.4f} {rmse_bfgs:>14.4f}")
-    print(f"  {'R² 50s':<14s} {r2_50:>14.4f} {r2_50_bfgs:>14.4f}")
-    print(f"  {'R² 500s':<14s} {r2_500:>14.4f} {r2_500_bfgs:>14.4f}")
-    print(f"  {'Time (s)':<14s} {t_de + t_polish:>14.1f} {t_bfgs:>14.1f}")
+    # ── Summary ──
+    methods = ['ga', 'de', 'bfgs']
+    labels = ['Memetic GA', 'Diff.Evolution', 'Multi-BFGS']
+    print(f"\n  {'─'*72}")
+    print(f"  {'Method':<20s} {'Cost':>10s} {'RMSE':>8s} {'R²(50s)':>10s} {'R²(500s)':>10s} {'Time(s)':>8s}")
+    print(f"  {'─'*72}")
+    for m, lab in zip(methods, labels):
+        r = results[m]
+        print(f"  {lab:<20s} {r['cost']:>10.6f} {r['rmse']:>8.4f} {r['r2_50']:>10.4f} {r['r2_500']:>10.4f} {r['t']:>8.1f}")
 
-    print(f"\n  GA + Polish Parameters:")
+    best_m = min(methods, key=lambda m: results[m]['cost'])
+    print(f"\n  ★ Best: {labels[methods.index(best_m)]}  (cost={results[best_m]['cost']:.6f})")
+
+    # ── Best params ──
+    best_p = results[best_m]['params']
+    logA, H_star, x, beta, T0, scale = best_p
+    print(f"\n  Best Parameters ({labels[methods.index(best_m)]}):")
     print(f"    logA  = {logA:.4f}     (A = {10**logA:.4e} s)")
     print(f"    H*    = {H_star/1000:.2f} kJ/mol")
     print(f"    x     = {x:.4f}")
@@ -171,141 +446,235 @@ def fit():
     print(f"    T0    = {T0:.2f} K  ({T0-273.15:.1f} °C)")
     print(f"    scale = {scale:.4f} J/g")
 
-    # ── Pointwise table ──
-    print(f"\n  {'t(s)':>8s}  {'Exp50s':>8s}  {'GA_50s':>8s}  {'BFGS50s':>8s}  |  "
-          f"{'Exp500s':>8s}  {'GA_500s':>8s}  {'BFGS500s':>8s}")
-    for i in range(10):
-        print(f"  {t50[i]:8.3f}  {dh50[i]:8.4f}  {p50[i]:8.4f}  {p50_bfgs[i]:8.4f}  |  "
-              f"{dh500[i]:8.4f}  {p500[i]:8.4f}  {p500_bfgs[i]:8.4f}")
+    # Print detailed table for best method
+    p50_best, p500_best = compute_metrics(
+        best_p, t50, dh50, t500, dh500, T1, T2, t1_50s, t1_500s)[3:5]
+    bfgs_p = results['bfgs']['params']
+    p50_bfgs, p500_bfgs = compute_metrics(
+        bfgs_p, t50, dh50, t500, dh500, T1, T2, t1_50s, t1_500s)[3:5]
 
-    # ── Save ──
-    os.makedirs(os.path.join(RESULTS, 'tnm'), exist_ok=True)
-    pd.DataFrame([{
-        'method': 'GA+Polish',
-        'logA': logA, 'A_s': 10**logA, 'H_star_kJmol': H_star/1000,
-        'x': x, 'beta': beta, 'T0_K': T0, 'T0_C': T0 - 273.15,
-        'scale_Jg': scale, 'cost': best_c, 'rmse': rmse,
-        'r2_50s': r2_50, 'r2_500s': r2_500,
-        'nfe_de': de_result.nfev, 'nfe_polish': polish_result.nfev,
-        't_de_s': t_de, 't_polish_s': t_polish,
-    }]).to_csv(os.path.join(RESULTS, 'tnm', 'tnm_ga_params.csv'), index=False)
+    print(f"\n  {'t(s)':>8s}  {'Exp50s':>8s}  {'GA_50s':>8s}  {'DE_50s':>8s}  {'BFGS50s':>8s}  |  "
+          f"{'Exp500s':>8s}  {'GA_500s':>8s}  {'DE_500s':>8s}  {'BFGS500s':>8s}")
+    for i in range(min(10, len(t50))):
+        ga_50_i = simulate_vector(results['ga']['params'], [t50[i]], t1_50s, T1, T2)[0]
+        de_50_i = simulate_vector(results['de']['params'], [t50[i]], t1_50s, T1, T2)[0]
+        ga_500_i = simulate_vector(results['ga']['params'], [t500[i]], t1_500s, T1, T2)[0]
+        de_500_i = simulate_vector(results['de']['params'], [t500[i]], t1_500s, T1, T2)[0]
+        print(f"  {t50[i]:8.3f}  {dh50[i]:8.4f}  {ga_50_i:8.4f}  {de_50_i:8.4f}  {p50_bfgs[i]:8.4f}  |  "
+              f"{dh500[i]:8.4f}  {ga_500_i:8.4f}  {de_500_i:8.4f}  {p500_bfgs[i]:8.4f}")
 
-    pd.DataFrame([{
-        'method': 'MultiStart_LBFGSB',
-        'logA': bfgs_best_p[0], 'A_s': 10**bfgs_best_p[0],
-        'H_star_kJmol': bfgs_best_p[1]/1000,
-        'x': bfgs_best_p[2], 'beta': bfgs_best_p[3],
-        'T0_K': bfgs_best_p[4], 'T0_C': bfgs_best_p[4] - 273.15,
-        'scale_Jg': bfgs_best_p[5], 'cost': bfgs_best_c, 'rmse': rmse_bfgs,
-        'r2_50s': r2_50_bfgs, 'r2_500s': r2_500_bfgs,
-        't_s': t_bfgs,
-    }]).to_csv(os.path.join(RESULTS, 'tnm', 'tnm_bfgs_comparison_params.csv'), index=False)
+    return results, {'t50': t50, 'dh50': dh50, 't500': t500, 'dh500': dh500,
+                     'bounds': bounds, 'T1': T1, 'T2': T2,
+                     't1_50s': t1_50s, 't1_500s': t1_500s,
+                     'name': name, 'scenario': scenario}
 
-    # ── Convergence trace (re-run DE with store_history) ──
-    print("\n  Re-running DE with history tracking for convergence plot...", flush=True)
-    from scipy.optimize import OptimizeResult
-    history = []
-    def callback(xk, convergence=0):
-        history.append(cost(xk))
 
-    _ = differential_evolution(
-        cost, bounds, seed=42, maxiter=2000, tol=1e-10,
-        popsize=25, mutation=(0.5, 1.2), recombination=0.9,
-        polish=False, workers=1, disp=False,
-        callback=callback,
-    )
-    # Compute rolling best
-    rolling_best = np.minimum.accumulate(history)
+# ═════════════════════════════════════════════════════════════════════════════
+# Plotting
+# ═════════════════════════════════════════════════════════════════════════════
 
-    # ── Plot ──
-    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
-    fig.suptitle('TNM Fit via Genetic Algorithm (Differential Evolution)', fontsize=14, fontweight='bold')
+def make_plots(results, data, prefix):
+    name = data['name']
+    t50, dh50 = data['t50'], data['dh50']
+    t500, dh500 = data['t500'], data['dh500']
+    T1, T2 = data['T1'], data['T2']
+    t1_50s, t1_500s = data['t1_50s'], data['t1_500s']
+    bounds = data['bounds']
 
-    # Main fit plot
+    fig, axes = plt.subplots(2, 3, figsize=(20, 12))
+    colors = {'ga': '#2ca02c', 'de': '#9467bd', 'bfgs': '#d62728'}
+    labels = {'ga': 'Memetic GA', 'de': 'Differential Evolution', 'bfgs': 'Multi-start L-BFGS-B'}
+    t_plot = np.logspace(-1, 6, 300)
+
+    # ── Panel (0,0): Fit curves ──
     ax = axes[0, 0]
-    t_plt = np.logspace(-1, 6, 300)
-    ga50p = simulate_vector(best_p, t_plt, T1_50S)
-    ga500p = simulate_vector(best_p, t_plt, T1_500S)
-    bg50p = simulate_vector(bfgs_best_p, t_plt, T1_50S)
-    bg500p = simulate_vector(bfgs_best_p, t_plt, T1_500S)
-
-    ax.scatter(t50, dh50, c='#1f77b4', marker='o', s=60, zorder=10,
-               edgecolors='k', lw=0.6, label='Exp 50s')
-    ax.scatter(t500, dh500, c='#ff7f0e', marker='s', s=60, zorder=10,
-               edgecolors='k', lw=0.6, label='Exp 500s')
-    ax.semilogx(t_plt, ga50p, '#1f77b4', ls='-', lw=2.2, label='GA 50s')
-    ax.semilogx(t_plt, ga500p, '#ff7f0e', ls='-', lw=2.2, label='GA 500s')
-    ax.semilogx(t_plt, bg50p, '#1f77b4', ls='--', lw=1.2, alpha=0.6, label='BFGS 50s')
-    ax.semilogx(t_plt, bg500p, '#ff7f0e', ls='--', lw=1.2, alpha=0.6, label='BFGS 500s')
-    ax.axhline(y=scale, color='red', ls=':', lw=1.2, alpha=0.5)
-    ax.axvline(x=1000, color='gray', ls='--', alpha=0.25)
-    ax.set_xlabel('$t_2$ (s)', fontsize=12)
-    ax.set_ylabel(r'$\Delta H$ (J/g)', fontsize=12)
-    ax.set_title('Two-Step (90°C→80°C): TNM Fit Comparison', fontsize=12, fontweight='bold')
-    ax.set_xlim(5e-2, 1e6); ax.set_ylim(-0.3, scale * 1.15)
+    for m, c in colors.items():
+        p = results[m]['params']
+        ax.semilogx(t_plot, simulate_vector(p, t_plot, t1_50s, T1, T2),
+                    c=colors[m], ls='-', lw=1.8, label=f"{labels[m]} 50s")
+        ax.semilogx(t_plot, simulate_vector(p, t_plot, t1_500s, T1, T2),
+                    c=colors[m], ls='--', lw=1.2, alpha=0.7, label=f"{labels[m]} 500s")
+    ax.scatter(t50, dh50, c='#1f77b4', marker='o', s=50, zorder=10,
+               edgecolors='k', lw=0.5, label='Exp 50s')
+    ax.scatter(t500, dh500, c='#ff7f0e', marker='s', s=50, zorder=10,
+               edgecolors='k', lw=0.5, label='Exp 500s')
+    ax.set_xlabel('$t_2$ (s)', fontsize=11)
+    ax.set_ylabel(r'$\Delta H$ (J/g)', fontsize=11)
+    ax.set_title(f'{name}: TNM Fit Comparison', fontsize=11, fontweight='bold')
+    ax.set_xlim(5e-2, 1e6)
     ax.grid(True, alpha=0.2)
-    ax.legend(fontsize=8, loc='lower right')
+    ax.legend(fontsize=7, loc='lower right')
 
-    # Convergence plot
+    # ── Panel (0,1): GA convergence ──
     ax = axes[0, 1]
-    ax.semilogy(rolling_best, '#2ca02c', lw=1.5, label='DE best cost')
-    ax.axhline(y=best_c, color='green', ls=':', lw=1.0, alpha=0.7, label=f'GA final: {best_c:.4f}')
-    ax.axhline(y=bfgs_best_c, color='#d62728', ls=':', lw=1.0, alpha=0.7, label=f'BFGS best: {bfgs_best_c:.4f}')
-    ax.set_xlabel('Function evaluations', fontsize=12)
-    ax.set_ylabel('Cost (SSE)', fontsize=12)
-    ax.set_title('DE Convergence', fontsize=12, fontweight='bold')
+    hist = results['ga']['history']
+    ax.semilogy(hist, '#2ca02c', lw=1.5, label='Classical GA')
+    ax.axhline(y=results['ga']['cost'], color='#2ca02c', ls=':', lw=1.0,
+               alpha=0.6, label=f"GA final: {results['ga']['cost']:.4f}")
+    ax.axhline(y=results['de']['cost'], color='#9467bd', ls=':', lw=1.0,
+               alpha=0.6, label=f"DE final: {results['de']['cost']:.4f}")
+    ax.axhline(y=results['bfgs']['cost'], color='#d62728', ls=':', lw=1.0,
+               alpha=0.6, label=f"BFGS final: {results['bfgs']['cost']:.4f}")
+    ax.set_xlabel('Generation', fontsize=11)
+    ax.set_ylabel('Cost (SSE)', fontsize=11)
+    ax.set_title('GA Convergence', fontsize=11, fontweight='bold')
+    ax.legend(fontsize=7)
+    ax.grid(True, alpha=0.2)
+
+    # ── Panel (0,2): Pointwise comparison ──
+    ax = axes[0, 2]
+    best_m = min(['ga', 'de', 'bfgs'], key=lambda m: results[m]['cost'])
+    bp = results[best_m]['params']
+    ax.scatter(dh50, simulate_vector(bp, t50, t1_50s, T1, T2),
+               c='#1f77b4', marker='o', s=40, zorder=5, edgecolors='k', lw=0.3, label='50s')
+    ax.scatter(dh500, simulate_vector(bp, t500, t1_500s, T1, T2),
+               c='#ff7f0e', marker='s', s=40, zorder=5, edgecolors='k', lw=0.3, label='500s')
+    lim = [-0.5, max(np.max(dh500), np.max(dh50)) * 1.05]
+    ax.plot(lim, lim, 'k-', alpha=0.3)
+    ax.set_xlim(lim); ax.set_ylim(lim)
+    ax.set_xlabel('Experimental ΔH (J/g)', fontsize=11)
+    ax.set_ylabel('Predicted ΔH (J/g)', fontsize=11)
+    ax.set_title(f'Parity ({labels[best_m]})', fontsize=11, fontweight='bold')
     ax.legend(fontsize=8)
     ax.grid(True, alpha=0.2)
 
-    # Parity plot
+    # ── Panel (1,0): Residuals ──
     ax = axes[1, 0]
-    ax.scatter(dh50, p50, c='#1f77b4', marker='o', s=50, zorder=5, edgecolors='k', lw=0.3, label='GA 50s')
-    ax.scatter(dh500, p500, c='#ff7f0e', marker='s', s=50, zorder=5, edgecolors='k', lw=0.3, label='GA 500s')
-    ax.scatter(dh50, p50_bfgs, c='#1f77b4', marker='o', s=25, alpha=0.3, label='BFGS 50s')
-    ax.scatter(dh500, p500_bfgs, c='#ff7f0e', marker='s', s=25, alpha=0.3, label='BFGS 500s')
-    lims = [-0.5, scale * 1.05]
-    ax.plot(lims, lims, 'k-', alpha=0.3, lw=1)
-    ax.set_xlim(lims); ax.set_ylim(lims)
-    ax.set_xlabel('Experimental ΔH (J/g)', fontsize=12)
-    ax.set_ylabel('Predicted ΔH (J/g)', fontsize=12)
-    ax.set_title('Parity Plot', fontsize=12, fontweight='bold')
-    ax.legend(fontsize=8)
-    ax.grid(True, alpha=0.2)
-
-    # Residuals
-    ax = axes[1, 1]
-    res_ga_50 = p50 - dh50
-    res_ga_500 = p500 - dh500
-    res_bfgs_50 = p50_bfgs - dh50
-    res_bfgs_500 = p500_bfgs - dh500
-
+    for m, c in colors.items():
+        p = results[m]['params']
+        r50 = simulate_vector(p, t50, t1_50s, T1, T2) - dh50
+        r500 = simulate_vector(p, t500, t1_500s, T1, T2) - dh500
+        ax.semilogx(t50, r50, 'o', c=c, ms=6, alpha=0.7, label=f'{labels[m]} 50s')
+        ax.semilogx(t500, r500, 's', c=c, ms=6, alpha=0.4, label=f'{labels[m]} 500s')
     ax.axhline(y=0, color='gray', ls='-', alpha=0.3)
-    ax.semilogx(t50, res_ga_50, 'o', c='#1f77b4', ms=7, label='GA 50s')
-    ax.semilogx(t500, res_ga_500, 's', c='#ff7f0e', ms=7, label='GA 500s')
-    ax.semilogx(t50, res_bfgs_50, 'o', c='#1f77b4', ms=4, alpha=0.4, label='BFGS 50s')
-    ax.semilogx(t500, res_bfgs_500, 's', c='#ff7f0e', ms=4, alpha=0.4, label='BFGS 500s')
-    ax.set_xlabel('$t_2$ (s)', fontsize=12)
-    ax.set_ylabel('Residual (J/g)', fontsize=12)
-    ax.set_title(f'Residuals (GA RMSE={rmse:.4f}, BFGS RMSE={rmse_bfgs:.4f})', fontsize=12, fontweight='bold')
-    ax.legend(fontsize=8)
+    ax.set_xlabel('$t_2$ (s)', fontsize=11)
+    ax.set_ylabel('Residual (J/g)', fontsize=11)
+    ax.set_title('Residuals', fontsize=11, fontweight='bold')
+    ax.legend(fontsize=6)
     ax.grid(True, alpha=0.2)
 
-    # Annotate with params
-    axes[0, 0].text(0.03, 0.96,
-                    f"GA + Polish\n  log A = {logA:.2f}\n"
-                    f"  H* = {H_star/1000:.1f} kJ/mol\n  x = {x:.4f}\n  β = {beta:.4f}\n"
-                    f"  T₀ = {T0:.1f} K\n  scale = {scale:.2f} J/g\n"
-                    f"R² 50s = {r2_50:.4f}  R² 500s = {r2_500:.4f}\nRMSE = {rmse:.4f}",
-                    transform=axes[0, 0].transAxes, fontsize=8.5, verticalalignment='top', family='monospace',
-                    bbox=dict(boxstyle='round,pad=0.5', facecolor='lightyellow', alpha=0.85, ec='gray'))
+    # ── Panel (1,1): Parameter landscape (T0 vs x) ──
+    ax = axes[1, 1]
+    lo, hi = bounds[2][0], bounds[2][1]  # x
+    to_lo, to_hi = bounds[4][0], bounds[4][1]  # T0
+    xs = np.linspace(lo, hi, 50)
+    ys = np.linspace(to_lo, to_hi, 50)
+    X, Y = np.meshgrid(xs, ys)
+    best_p_all = results[best_m]['params']
+    Z = np.zeros_like(X)
+    for i in range(len(ys)):
+        for j in range(len(xs)):
+            p_test = best_p_all.copy()
+            p_test[2] = X[i, j]
+            p_test[4] = Y[i, j]
+            try:
+                p50 = simulate_vector(p_test, t50, t1_50s, T1, T2)
+                p500 = simulate_vector(p_test, t500, t1_500s, T1, T2)
+                Z[i, j] = np.log10(np.sum((p50 - dh50)**2) + np.sum((p500 - dh500)**2))
+            except Exception:
+                Z[i, j] = 10
 
-    fig.tight_layout(rect=[0, 0, 1, 0.96])
-    fig.savefig(os.path.join(RESULTS, 'tnm', 'twosteps_tnm_ga_fit.png'), dpi=200)
+    levels = np.linspace(np.min(Z[Z < 9]), np.min(Z[Z < 9]) + 0.3, 15)
+    cs = ax.contour(X, Y, Z, levels=levels, colors='gray', linewidths=0.5, alpha=0.5)
+    ax.contourf(X, Y, Z, levels=levels, cmap='YlOrRd_r', alpha=0.5)
+    for m, c in colors.items():
+        ax.scatter(results[m]['params'][2], results[m]['params'][4],
+                   c=c, marker='o', s=120, zorder=10, edgecolors='k', lw=1.5,
+                   label=labels[m])
+    ax.set_xlabel('x (nonlinearity)', fontsize=11)
+    ax.set_ylabel('T₀ (K)', fontsize=11)
+    ax.set_title('Cost Landscape (x vs T₀)', fontsize=11, fontweight='bold')
+    ax.legend(fontsize=7)
+    ax.grid(True, alpha=0.2)
+
+    # ── Panel (1,2): Method comparison bar chart ──
+    ax = axes[1, 2]
+    meth_labels = ['GA', 'DE', 'BFGS']
+    meth_costs = [results[m]['cost'] for m in ['ga', 'de', 'bfgs']]
+    meth_rmse = [results[m]['rmse'] for m in ['ga', 'de', 'bfgs']]
+    meth_r2 = [(results[m]['r2_50'] + results[m]['r2_500']) / 2 for m in ['ga', 'de', 'bfgs']]
+    x = np.arange(len(meth_labels))
+    w = 0.25
+    bars1 = ax.bar(x - w, meth_costs / max(meth_costs), w, label='Cost (norm)', color=['#2ca02c', '#9467bd', '#d62728'], alpha=0.8)
+    bars2 = ax.bar(x, meth_rmse / max(meth_rmse), w, label='RMSE (norm)', color=['#2ca02c', '#9467bd', '#d62728'], alpha=0.5)
+    bars3 = ax.bar(x + w, meth_r2 / max(meth_r2), w, label='Avg R² (norm)', color=['#2ca02c', '#9467bd', '#d62728'], alpha=0.3)
+    ax.set_xticks(x)
+    ax.set_xticklabels(meth_labels, fontsize=10)
+    ax.set_ylabel('Normalized', fontsize=11)
+    ax.set_title('Method Comparison (normalized)', fontsize=11, fontweight='bold')
+    ax.legend(fontsize=7)
+    ax.grid(True, alpha=0.2)
+
+    fig.tight_layout()
+    os.makedirs(os.path.join(RESULTS, 'tnm'), exist_ok=True)
+    path = os.path.join(RESULTS, 'tnm', f'{prefix}_comparison.png')
+    fig.savefig(path, dpi=200)
     plt.close()
-    print(f"  Plot saved to results/tnm/twosteps_tnm_ga_fit.png")
+    print(f"  Plot saved to {path}")
 
-    return best_p, rmse, (r2_50, r2_500)
+    return path
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Main
+# ═════════════════════════════════════════════════════════════════════════════
+
+def main():
+    print("=" * 70)
+    print("  TNM MODEL FITTING — GENETIC ALGORITHM")
+    print("  Comparing: Classical GA | Differential Evolution | Multi-start L-BFGS-B")
+    print("=" * 70)
+
+    # ── Experiment 1: Kovacs Up-Jump (80°C→90°C) — better constrained ──
+    res_kovacs, data_kovacs = run_experiment(
+        "Kovacs Up-Jump (80°C→90°C)", load_kovacs_data, 'kovacs')
+
+    # ── Experiment 2: Two-Step Down-Jump (90°C→80°C) ──
+    res_ts, data_ts = run_experiment(
+        "Two-Step Down-Jump (90°C→80°C)", load_twosteps_data, 'twosteps')
+
+    # ── Plots ──
+    make_plots(res_kovacs, data_kovacs, 'ga_kovacs')
+    make_plots(res_ts, data_ts, 'ga_twosteps')
+
+    # ── Save all params ──
+    rows = []
+    for exp, res, data in [('kovacs', res_kovacs, data_kovacs),
+                            ('twosteps', res_ts, data_ts)]:
+        for m in ['ga', 'de', 'bfgs']:
+            p = res[m]['params']
+            rows.append({
+                'experiment': exp,
+                'method': m,
+                'logA': p[0], 'A_s': 10**p[0],
+                'H_star_kJmol': p[1] / 1000,
+                'x': p[2], 'beta': p[3],
+                'T0_K': p[4], 'T0_C': p[4] - 273.15,
+                'scale_Jg': p[5],
+                'cost': res[m]['cost'],
+                'rmse': res[m]['rmse'],
+                'r2_50s': res[m]['r2_50'],
+                'r2_500s': res[m]['r2_500'],
+                'time_s': res[m]['t'],
+            })
+    pd.DataFrame(rows).to_csv(
+        os.path.join(RESULTS, 'tnm', 'ga_all_params.csv'), index=False)
+    print(f"\n  All params saved to results/tnm/ga_all_params.csv")
+
+    # ── Final summary ──
+    print(f"\n{'='*70}")
+    print(f"  FINAL SUMMARY")
+    print(f"{'='*70}")
+    for exp_name, res in [('Kovacs Up-Jump', res_kovacs), ('Two-Step', res_ts)]:
+        best_m = min(['ga', 'de', 'bfgs'], key=lambda m: res[m]['cost'])
+        print(f"\n  {exp_name}:")
+        print(f"    Best method: {best_m.upper()}")
+        print(f"    Best cost:   {res[best_m]['cost']:.6f}")
+        print(f"    Best RMSE:   {res[best_m]['rmse']:.4f}")
+        print(f"    Best R²:     50s={res[best_m]['r2_50']:.4f}  500s={res[best_m]['r2_500']:.4f}")
+        p = res[best_m]['params']
+        print(f"    Params: logA={p[0]:.3f}  H*={p[1]/1000:.1f}kJ/mol  x={p[2]:.4f}  β={p[3]:.4f}  T0={p[4]:.1f}K  scale={p[5]:.4f}")
 
 
 if __name__ == '__main__':
-    fit()
+    main()
