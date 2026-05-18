@@ -539,8 +539,11 @@ def main():
     print(f"{'=' * 70}")
 
     # ── Generate plots ──
-    print(f"\n[6/6] Generating result plots...")
+    print(f"\n[6/7] Generating combined result plots...")
     plot_all_results(df_os_50, df_os_70, df_ts, df_kov, t_int_low)
+
+    print(f"\n[7/7] Generating new Kovacs 80→90°C plot...")
+    plot_kovacs_new(df_kov_new, ref_T_onset, t_int_low)
 
 
 def plot_all_results(df_os_50, df_os_70, df_ts, df_kov, t_int_low=None):
@@ -619,6 +622,51 @@ def plot_all_results(df_os_50, df_os_70, df_ts, df_kov, t_int_low=None):
     plt.tight_layout(rect=[0, 0, 1, 0.95])
     suffix = f'_{int(t_int_low)}C' if t_int_low else ''
     png_path = os.path.join(RESULTS_DIR, f'enthalpy_all_results{suffix}.png')
+    plt.savefig(png_path, dpi=150, bbox_inches='tight')
+    print(f"  Saved {png_path}")
+    plt.close()
+
+
+def plot_kovacs_new(df_kov_new, ref_T_onset, t_int_low=None):
+    """Generate a dedicated plot for the new Kovacs 80→90°C experiment."""
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+
+    int_label = f'(Integral: {int(t_int_low)}°C–Tg)' if t_int_low else ''
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+    fig.suptitle(f'Kovacs 80→90°C — New Experiment {int_label}',
+                 fontsize=14, fontweight='bold')
+
+    grp_col = 'T1_group'
+    color_cycle = ['#2166AC', '#B2182B', '#4DAF4A', '#FF7F00']
+    marker_cycle = ['o', 's', '^', 'D']
+
+    for i, grp in enumerate(sorted(df_kov_new[grp_col].unique())):
+        g = df_kov_new[df_kov_new[grp_col] == grp]
+        color = color_cycle[i % len(color_cycle)]
+        marker = marker_cycle[i % len(marker_cycle)]
+        ax.plot(g['T2_hold_s'], g['delta_H_J_per_g'],
+                marker=marker, color=color, linewidth=1.5, markersize=8,
+                markerfacecolor='white', markeredgewidth=1.5, label=f'T1 hold = {grp}')
+        for _, row in g.iterrows():
+            ax.annotate(f"{row['T2_hold_s']:.1f}s",
+                        (row['T2_hold_s'], row['delta_H_J_per_g']),
+                        textcoords="offset points", xytext=(8, -5),
+                        fontsize=8, color=color)
+
+    ax.set_xlabel('T2 hold time at 90°C (s)')
+    ax.set_ylabel('ΔH (J/g)')
+    ax.set_title(f'Kovacs up-jump 80→90°C | Ref T_onset = {ref_T_onset:.1f}°C')
+    ax.set_xscale('log')
+    ax.invert_yaxis()
+    ax.legend(fontsize=9)
+    ax.grid(True, alpha=0.3, which='both')
+
+    plt.tight_layout(rect=[0, 0, 1, 0.95])
+    suffix = f'_{int(t_int_low)}C' if t_int_low else ''
+    png_path = os.path.join(RESULTS_DIR, f'enthalpy_kovacs_80-90C{suffix}.png')
     plt.savefig(png_path, dpi=150, bbox_inches='tight')
     print(f"  Saved {png_path}")
     plt.close()
