@@ -540,14 +540,17 @@ def main():
 
     # ── Generate plots ──
     print(f"\n[6/7] Generating combined result plots...")
-    plot_all_results(df_os_50, df_os_70, df_ts, df_kov, t_int_low)
+    plot_all_results(df_os_50, df_os_70, df_ts, df_kov, t_int_low,
+                     df_kov_new=df_kov_new)
 
     print(f"\n[7/7] Generating new Kovacs 80→90°C plot...")
     plot_kovacs_new(df_kov_new, ref_T_onset, t_int_low)
 
 
-def plot_all_results(df_os_50, df_os_70, df_ts, df_kov, t_int_low=None):
-    """Generate 2x2 comparison plot for all experiments."""
+def plot_all_results(df_os_50, df_os_70, df_ts, df_kov, t_int_low=None,
+                     df_kov_new=None):
+    """Generate 2x2 comparison plot for all experiments.
+    If df_kov_new is provided, it is overlaid on the Kovacs panel."""
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
@@ -566,12 +569,13 @@ def plot_all_results(df_os_50, df_os_70, df_ts, df_kov, t_int_low=None):
     def _get_group_colors_markers(all_dfs):
         all_groups = set()
         for df in all_dfs:
-            all_groups.update(_get_groups(df))
+            if df is not None:
+                all_groups.update(_get_groups(df))
         groups_sorted = sorted(all_groups, key=lambda x: int(x.replace('s', '')) if x.replace('s', '').isdigit() else 0)
         return ({g: color_cycle[i % len(color_cycle)] for i, g in enumerate(groups_sorted)},
                 {g: marker_cycle[i % len(marker_cycle)] for i, g in enumerate(groups_sorted)})
 
-    colors, markers = _get_group_colors_markers([df_os_50, df_os_70, df_ts, df_kov])
+    colors, markers = _get_group_colors_markers([df_os_50, df_os_70, df_ts, df_kov, df_kov_new])
 
     def plot_one(ax, df, title, x_col, xlabel):
         grp_col = 'cooling_group' if 'cooling_group' in df.columns else 'T1_group'
@@ -601,22 +605,32 @@ def plot_all_results(df_os_50, df_os_70, df_ts, df_kov, t_int_low=None):
     plot_one(axes[1, 0], df_ts, 'Two-step annealing (90→80°C)', 'T2_hold_s',
              'T2 hold time at 80°C (s)')
 
-    # Panel 4: Kovacs
+    # Panel 4: Kovacs (old + new overlaid)
     ax4 = axes[1, 1]
     grp_col = 'T1_group'
+    # Old Kovacs data — solid lines
     for grp in sorted(df_kov[grp_col].unique()):
         g = df_kov[df_kov[grp_col] == grp]
         if len(g) > 0:
             ax4.plot(g['T2_hold_s'], g['delta_H_J_per_g'],
                      marker=markers.get(grp, 'o'), color=colors.get(grp, 'gray'),
                      linewidth=1.5, markersize=7, markerfacecolor='white',
-                     markeredgewidth=1.5, label=grp)
+                     markeredgewidth=1.5, linestyle='-', label=f'{grp} (old)')
+    # New Kovacs data — dashed lines with larger markers
+    if df_kov_new is not None and len(df_kov_new) > 0:
+        for grp in sorted(df_kov_new[grp_col].unique()):
+            g = df_kov_new[df_kov_new[grp_col] == grp]
+            if len(g) > 0:
+                ax4.plot(g['T2_hold_s'], g['delta_H_J_per_g'],
+                         marker=markers.get(grp, 'o'), color=colors.get(grp, 'gray'),
+                         linewidth=2.0, markersize=9, markerfacecolor=colors.get(grp, 'gray'),
+                         markeredgewidth=1.5, linestyle='--', label=f'{grp} (new)')
     ax4.set_xlabel('T2 hold time at 90°C (s)')
     ax4.set_ylabel('ΔH (J/g)')
     ax4.set_title('Kovacs up-jump (80→90°C)')
     ax4.set_xscale('log')
     ax4.invert_yaxis()
-    ax4.legend(fontsize=9)
+    ax4.legend(fontsize=8)
     ax4.grid(True, alpha=0.3, which='both')
 
     plt.tight_layout(rect=[0, 0, 1, 0.95])
