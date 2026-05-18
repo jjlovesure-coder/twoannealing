@@ -1,0 +1,4 @@
+ramp,experiment,T1_C,T2_C,T1_hold_s,T2_hold_s,T1_cool_rate_K_per_min,up_jump_rate_K_per_min,cooling_rate_to_glass_K_per_min,heating_rate_K_per_min,T1_group,T_onset_C,delta_H_J_per_g,overshoot_peak_uW
+1,Kovacs 80-90C,80.0000,90.0000,4999.9800,0.4998,60.0000,60.0000,60.0000,10.0000,5000s,100.7385,4.6559,271.7570
+2,Kovacs 80-90C,80.0000,90.0000,4999.9980,1.0002,60.0000,60.0000,60.0000,10.0000,5000s,100.7211,5.6780,275.2155
+3,Kovacs 80-90C,80.0000,90.0000,4999.9980,4.9980,60.0000,60.0000,60.0000,10.0000,5000s,100.6691,6.2634,272.2861
