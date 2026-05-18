@@ -49,20 +49,35 @@ $$\beta = \frac{dT}{dt} = \frac{10\text{ K/min}}{60\text{ s/min}} = \frac{1}{6}\
 
 $$\text{CONV\_JG} = \frac{1/\beta}{m \times 1000} = \frac{6}{4.7 \times 1000} = 1.277 \times 10^{-3}\text{ J/g per µW·°C}$$
 
-**积分范围**：T_min=40°C 到 T_onset（液体起始温度，~103°C）
+**积分范围**：T_min=40°C 到 T_onset（液体起始温度，~103°C），步长0.1°C。
 
-**积分公式**：
+**焓变计算**（三步推导）：
 
-$$\int_{40°C}^{T_{onset}} \Delta DSC(T) \, dT = \int_{40°C}^{T_{onset}} [DSC_{sample}(T) - DSC_{empty}(T)] \, dT \quad [\mu W \cdot °C]$$
+**步骤1**：每个升温段计算其DSC曲线与空坩埚的差值的积分：
 
-**焓变计算**：
+$$I_i = \int_{40°C}^{T_{onset,i}} \big[DSC_i(T) - DSC_{empty}(T)\big] \, dT \quad [\mu W \cdot °C]$$
 
-$$\Delta H_i = \left(\int_{40}^{T_{onset,i}} \Delta DSC \, dT - \text{ref}\right) \times \text{CONV\_JG}$$
+**步骤2**：计算参考积分（ref）：
+- Kovacs实验：ref 来自独立未老化扫描 `ps-ref-02.xlsx`，同样减去空坩埚基线
+- Two-Step实验：ref 取第一个升温段的I₁（最短t₂，作为内参）
 
-其中：
-- **Kovacs实验**：ref = 外部参考扫描积分值（`ps-ref-02.xlsx`），代表未老化玻璃的基线焓
-- **Two-Step实验**：ref = 第一个升温段的积分值（最短t₂的曲线作为内参）
-- 符号惯例：ΔH > 0 表示焓恢复（结构弛豫放热）
+$$I_{ref} = \int_{40°C}^{T_{onset,ref}} \big[DSC_{ref}(T) - DSC_{empty}(T)\big] \, dT$$
+
+**步骤3**：差值×转换因子得到焓变：
+
+$$\Delta H_i = (I_i - I_{ref}) \times \text{CONV\_JG}$$
+
+**关键简化**：展开可见空坩埚基线互相抵消：
+
+$$\begin{aligned}
+\Delta H_i &= \left[\int (DSC_i - empty) - \int (DSC_{ref} - empty)\right] \times CONV \\
+           &= \left[\int DSC_i - \int DSC_{ref}\right] \times CONV
+\end{aligned}$$
+
+即：空坩埚基线在差值计算中完全抵消，最终**等效于直接对原始DSC信号积分求差**。
+代码中保留空坩埚减法是为了每步积分的一致性，但净效果与此无关。
+
+符号惯例：ΔH > 0 表示焓恢复（结构弛豫放热）。
 
 ### 2.3 T_onset检测
 
@@ -312,9 +327,13 @@ DE概率随代数线性增长（0→0.3），在后期替代变弱的BLX-α交�
 
 ### 6.1 DSC→焓变
 
-$$\Delta H_i = \left[\int_{40°C}^{T_{onset,i}} (DSC_{samp} - DSC_{empty})\,dT - \text{ref}\right] \times \frac{1/\beta}{m \times 1000}$$
+$$I_i = \int_{40°C}^{T_{onset,i}} \big[DSC_i(T) - DSC_{empty}(T)\big] \, dT \quad [\mu W \cdot °C]$$
+
+$$\Delta H_i = (I_i - I_{ref}) \times \frac{1/\beta}{m \times 1000}$$
 
 $$\beta = \frac{10\text{ K/min}}{60} = 0.1667\text{ K/s}, \quad m = 4.7\text{ mg}$$
+
+空坩埚减法在差值中抵消：ΔH_i ∝ ∫DSC_i − ∫DSC_ref。
 
 ### 6.2 KWW唯象模型
 
